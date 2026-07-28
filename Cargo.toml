@@ -1,0 +1,19 @@
+[package]
+name = "VOPRF"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tfhe-ntt = "0.7.1"
+rayon = "1"
+
+[profile.dev]
+opt-level = 2
+
+[lib]
+name = "voprf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "poh_demo"
+path = "src/main.rs"
