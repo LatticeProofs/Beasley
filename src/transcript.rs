@@ -1,12 +1,13 @@
-use crate::ext_field::Fq4;
-use crate::field::{Fq, Q};
+
+use crate::ext_field::FqExt;
+use crate::field::{fq_from_words, Fq, FQ_BYTES, Q};
 use crate::keccak::Shake128;
 
 const T_DOMAIN: u32 = u32::from_le_bytes(*b"DOMN");
 const T_U64: u32 = u32::from_le_bytes(*b"U64_");
 const T_FQ: u32 = u32::from_le_bytes(*b"FQ__");
 const T_FQS: u32 = u32::from_le_bytes(*b"FQS_");
-const T_FQ4: u32 = u32::from_le_bytes(*b"FQ4_");
+const T_FQ_EXT: u32 = u32::from_le_bytes(*b"FQ4_");
 const T_DIGEST: u32 = u32::from_le_bytes(*b"DGST");
 const T_CHAL: u32 = u32::from_le_bytes(*b"CHAL");
 
@@ -30,21 +31,30 @@ impl Transcript {
 
     pub fn absorb_fq(&mut self, x: Fq) {
         self.h.absorb_u32(T_FQ);
-        self.h.absorb_u32(x.0);
+        self.absorb_fq_repr(x);
+    }
+
+    #[inline(always)]
+    fn absorb_fq_repr(&mut self, x: Fq) {
+        let v = x.0 as u64;
+        self.h.absorb_u32(v as u32);
+        if FQ_BYTES > 4 {
+            self.h.absorb_u32((v >> 32) as u32);
+        }
     }
 
     pub fn absorb_fqs(&mut self, xs: &[Fq]) {
         self.h.absorb_u32(T_FQS);
         self.h.absorb_u32(xs.len() as u32);
         for &x in xs {
-            self.h.absorb_u32(x.0);
+            self.absorb_fq_repr(x);
         }
     }
 
-    pub fn absorb_fq4(&mut self, x: Fq4) {
-        self.h.absorb_u32(T_FQ4);
+    pub fn absorb_fq4(&mut self, x: FqExt) {
+        self.h.absorb_u32(T_FQ_EXT);
         for c in x.0 {
-            self.h.absorb_u32(c.0);
+            self.absorb_fq_repr(c);
         }
     }
 
@@ -56,20 +66,15 @@ impl Transcript {
     pub fn challenge_fq(&mut self) -> Fq {
         self.h.absorb_u32(T_CHAL);
         loop {
-            let v = self.h.squeeze_u32();
-            if (v as u64) < Q {
-                return Fq(v);
+            let v = fq_from_words(|| self.h.squeeze_u32());
+            if v < Q {
+                return Fq(v as _);
             }
         }
     }
 
-    pub fn challenge_fq4(&mut self) -> Fq4 {
-        Fq4([
-            self.challenge_fq(),
-            self.challenge_fq(),
-            self.challenge_fq(),
-            self.challenge_fq(),
-        ])
+    pub fn challenge_fq4(&mut self) -> FqExt {
+        FqExt::from_fn(|_| self.challenge_fq())
     }
 
     pub fn challenge_u64(&mut self) -> u64 {
@@ -111,8 +116,8 @@ impl SimpleRng {
         Fq::new(self.next_u64() % Q)
     }
 
-    pub fn next_fq4(&mut self) -> Fq4 {
-        Fq4([self.next_fq(), self.next_fq(), self.next_fq(), self.next_fq()])
+    pub fn next_fq4(&mut self) -> FqExt {
+        FqExt::from_fn(|_| self.next_fq())
     }
 
     pub fn next_bool(&mut self) -> bool {
@@ -124,7 +129,7 @@ impl SimpleRng {
 mod tests {
     use super::*;
 
-    fn ch(f: impl Fn(&mut Transcript)) -> Fq4 {
+    fn ch(f: impl Fn(&mut Transcript)) -> FqExt {
         let mut t = Transcript::new("test");
         f(&mut t);
         t.challenge_fq4()
@@ -163,11 +168,11 @@ mod tests {
         let by_u64 = ch(|t| t.absorb_u64(1));
         let by_fq = ch(|t| t.absorb_fq(one));
         let by_fqs = ch(|t| t.absorb_fqs(&[one]));
-        let by_fq4 = ch(|t| t.absorb_fq4(Fq4::ONE));
+        let by_fq4 = ch(|t| t.absorb_fq4(FqExt::ONE));
         let all = [by_u64, by_fq, by_fqs, by_fq4];
         for i in 0..4 {
             for j in i + 1..4 {
-                assert_ne!(all[i], all[j], "型別 {i} 與 {j} 撞了");
+                assert_ne!(all[i], all[j], "type tag {i} collides with {j}");
             }
         }
         let two = Fq::new(2);
@@ -183,14 +188,20 @@ mod tests {
     #[test]
     fn canonical_encoding_is_pinned() {
         let mut t = Transcript::new("pin");
-        t.absorb_fqs(&[Fq(0), Fq(1), Fq(Q as u32 - 1)]);
-        t.absorb_fq4(Fq4([Fq(7), Fq(8), Fq(9), Fq(10)]));
+        t.absorb_fqs(&[Fq(0), Fq(1), Fq((Q - 1) as _)]);
+        t.absorb_fq4(FqExt::from_fn(|i| Fq((7 + i) as _)));
         t.absorb_u64(0x0123_4567_89ab_cdef);
         let d = t.challenge_fq4();
+        let got: Vec<u64> = d.coeffs().iter().map(|c| c.0 as u64).collect();
+
+        #[cfg(feature = "q32")]
+        let want: Vec<u64> = vec![379608887, 773585188, 179761591, 1944056472];
+        #[cfg(feature = "q64")]
+        let want: Vec<u64> = vec![14664575010480232952, 13599215798014194027];
+
         assert_eq!(
-            [d.0[0].0, d.0[1].0, d.0[2].0, d.0[3].0],
-            [379608887, 773585188, 179761591, 1944056472],
-            "transcript 的 canonical 編碼改變了 —— 這會讓舊 proof 全部失效，確認是有意的"
+            got, want,
+            "transcript canonical encoding changed -- this invalidates every old proof; confirm it is intentional"
         );
     }
 
@@ -206,7 +217,7 @@ mod tests {
                 hi += 1;
             }
         }
-        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "分布傾斜：上半 {hi}/{N}");
+        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "distribution skewed: upper half {hi}/{N}");
     }
 
     #[test]

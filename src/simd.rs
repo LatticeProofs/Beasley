@@ -1,5 +1,6 @@
+
 use crate::bits::PackedBits;
-use crate::ext_field::Fq4;
+use crate::ext_field::{Fq4, FqExt};
 use crate::field::{reduce64, Fq, C, Q};
 use rayon::prelude::*;
 
@@ -29,22 +30,22 @@ fn subq(a: u64, b: u64) -> u64 {
 }
 
 #[derive(Clone)]
-pub struct SoaFq4 {
+pub struct SoaFqExt {
     pub c: [Vec<u64>; 4],
 }
 
-impl SoaFq4 {
+impl SoaFqExt {
     pub fn len(&self) -> usize {
         self.c[0].len()
     }
-    pub fn from_aos(v: &[Fq4]) -> Self {
+    pub fn from_aos(v: &[FqExt]) -> Self {
         let mut c: [Vec<u64>; 4] = Default::default();
         for k in 0..4 {
             c[k] = v.iter().map(|e| to_mont(e.0[k])).collect();
         }
-        SoaFq4 { c }
+        SoaFqExt { c }
     }
-    pub fn get(&self, i: usize) -> Fq4 {
+    pub fn get(&self, i: usize) -> FqExt {
         Fq4([
             from_mont(self.c[0][i]),
             from_mont(self.c[1][i]),
@@ -146,7 +147,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub unsafe fn bitcheck_evals(ext: &SoaFq4, eqsuf: &SoaFq4, half: usize) -> (Fq4, Fq4) {
+    pub unsafe fn bitcheck_evals(ext: &SoaFqExt, eqsuf: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
         let q = splat(QN);
         let np = splat(NPRIME as u64);
         let one = splat(super::MONT_ONE);
@@ -196,11 +197,11 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     pub unsafe fn bitcheck_evals_split(
-        ext: &SoaFq4,
-        ea: &SoaFq4,
-        eb: &SoaFq4,
+        ext: &SoaFqExt,
+        ea: &SoaFqExt,
+        eb: &SoaFqExt,
         half: usize,
-    ) -> (Fq4, Fq4) {
+    ) -> (FqExt, FqExt) {
         let q = splat(QN);
         let np = splat(NPRIME as u64);
         let one = splat(super::MONT_ONE);
@@ -280,7 +281,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub unsafe fn fold(ext: &mut SoaFq4, half: usize, rm: [u64; 4]) {
+    pub unsafe fn fold(ext: &mut SoaFqExt, half: usize, rm: [u64; 4]) {
         let q = splat(QN);
         let np = splat(NPRIME as u64);
         let rv = [splat(rm[0]), splat(rm[1]), splat(rm[2]), splat(rm[3])];
@@ -320,23 +321,23 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     pub unsafe fn batched_phase_a_round(
-        w: &SoaFq4,
-        apow: &SoaFq4,
-        ea: &SoaFq4,
-        eb: &SoaFq4,
-        lg: &[Fq4],
+        w: &SoaFqExt,
+        apow: &SoaFqExt,
+        ea: &SoaFqExt,
+        eb: &SoaFqExt,
+        lg: &[FqExt],
         half: usize,
         s_len: usize,
         k_lo: usize,
         k_hi: usize,
-    ) -> ([Fq4; 3], [Fq4; 3]) {
+    ) -> ([FqExt; 3], [FqExt; 3]) {
         let q = splat(QN);
         let np = splat(NPRIME as u64);
         let one = splat(super::MONT_ONE);
         let half_k = lg.len() / 2;
         let chunks = s_len / 4;
-        let mut gf2 = [Fq4::ZERO; 3];
-        let mut q3 = [Fq4::ZERO; 3];
+        let mut gf2 = [FqExt::ZERO; 3];
+        let mut q3 = [FqExt::ZERO; 3];
 
         for k in k_lo..k_hi {
             let mut rd = [[_mm256_setzero_si256(); 4]; 3];
@@ -409,23 +410,23 @@ mod avx2 {
     #[target_feature(enable = "avx2")]
     pub unsafe fn batched_phase_a_round0(
         zw: &PackedBits,
-        apow: &SoaFq4,
-        ea: &SoaFq4,
-        eb: &SoaFq4,
-        lg: &[Fq4],
+        apow: &SoaFqExt,
+        ea: &SoaFqExt,
+        eb: &SoaFqExt,
+        lg: &[FqExt],
         half: usize,
         s_len: usize,
         k_lo: usize,
         k_hi: usize,
-    ) -> ([Fq4; 3], [Fq4; 3]) {
+    ) -> ([FqExt; 3], [FqExt; 3]) {
         let q = splat(QN);
         let np = splat(NPRIME as u64);
         let one = splat(super::MONT_ONE);
         let mo = super::MONT_ONE as i64;
         let half_k = lg.len() / 2;
         let chunks = s_len / 4;
-        let mut gf2 = [Fq4::ZERO; 3];
-        let mut q3 = [Fq4::ZERO; 3];
+        let mut gf2 = [FqExt::ZERO; 3];
+        let mut q3 = [FqExt::ZERO; 3];
 
         for k in k_lo..k_hi {
             let mut rd = [[_mm256_setzero_si256(); 4]; 3];
@@ -479,7 +480,7 @@ mod avx2 {
     }
 
     #[inline(always)]
-    fn mont_to_fq4(a: [u64; 4]) -> Fq4 {
+    fn mont_to_fq4(a: [u64; 4]) -> FqExt {
         Fq4([from_mont(a[0]), from_mont(a[1]), from_mont(a[2]), from_mont(a[3])])
     }
 
@@ -495,7 +496,7 @@ mod avx2 {
     }
 }
 
-pub fn eq_table_mont(tau: &[Fq4]) -> SoaFq4 {
+pub fn eq_table_mont(tau: &[FqExt]) -> SoaFqExt {
     let mut aos: Vec<[u64; 4]> = vec![[MONT_ONE, 0, 0, 0]];
     for t in tau.iter().rev() {
         let tm = [to_mont(t.0[0]), to_mont(t.0[1]), to_mont(t.0[2]), to_mont(t.0[3])];
@@ -516,7 +517,7 @@ pub fn eq_table_mont(tau: &[Fq4]) -> SoaFq4 {
     for k in 0..4 {
         c[k] = aos.iter().map(|v| v[k]).collect();
     }
-    SoaFq4 { c }
+    SoaFqExt { c }
 }
 
 #[inline(always)]
@@ -537,7 +538,7 @@ fn tail_bit_terms(lo: [u64; 4], hi: [u64; 4], eq: [u64; 4]) -> ([u64; 4], [u64; 
 
 const MONT_ONE: u64 = 1;
 
-pub fn bitcheck_evals(ext: &SoaFq4, eqsuf: &SoaFq4, half: usize) -> (Fq4, Fq4) {
+pub fn bitcheck_evals(ext: &SoaFqExt, eqsuf: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
@@ -547,7 +548,7 @@ pub fn bitcheck_evals(ext: &SoaFq4, eqsuf: &SoaFq4, half: usize) -> (Fq4, Fq4) {
     bitcheck_evals_scalar(ext, eqsuf, half)
 }
 
-pub fn bitcheck_evals_split(ext: &SoaFq4, ea: &SoaFq4, eb: &SoaFq4, half: usize) -> (Fq4, Fq4) {
+pub fn bitcheck_evals_split(ext: &SoaFqExt, ea: &SoaFqExt, eb: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
@@ -557,7 +558,7 @@ pub fn bitcheck_evals_split(ext: &SoaFq4, ea: &SoaFq4, eb: &SoaFq4, half: usize)
     bitcheck_evals_split_scalar(ext, ea, eb, half)
 }
 
-pub fn bitcheck_evals_split_scalar(ext: &SoaFq4, ea: &SoaFq4, eb: &SoaFq4, half: usize) -> (Fq4, Fq4) {
+pub fn bitcheck_evals_split_scalar(ext: &SoaFqExt, ea: &SoaFqExt, eb: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
     let eb_n = eb.len();
     let mut h0 = [0u64; 4];
     let mut h2 = [0u64; 4];
@@ -582,9 +583,9 @@ pub fn bitcheck_evals_split_scalar(ext: &SoaFq4, ea: &SoaFq4, eb: &SoaFq4, half:
 }
 
 #[inline]
-fn split_k<F>(half_k: usize, cells: usize, f: F) -> ([Fq4; 3], [Fq4; 3])
+fn split_k<F>(half_k: usize, cells: usize, f: F) -> ([FqExt; 3], [FqExt; 3])
 where
-    F: Fn(usize, usize) -> ([Fq4; 3], [Fq4; 3]) + Sync + Send,
+    F: Fn(usize, usize) -> ([FqExt; 3], [FqExt; 3]) + Sync + Send,
 {
     const PAR_MIN_CELLS: usize = 1 << 14;
     if cells < PAR_MIN_CELLS || half_k < 2 {
@@ -592,12 +593,12 @@ where
     }
     let chunk = (half_k / (4 * rayon::current_num_threads())).max(1);
     let nch = half_k.div_ceil(chunk);
-    let parts: Vec<([Fq4; 3], [Fq4; 3])> = (0..nch)
+    let parts: Vec<([FqExt; 3], [FqExt; 3])> = (0..nch)
         .into_par_iter()
         .map(|c| f(c * chunk, ((c + 1) * chunk).min(half_k)))
         .collect();
-    let mut gf2 = [Fq4::ZERO; 3];
-    let mut q3 = [Fq4::ZERO; 3];
+    let mut gf2 = [FqExt::ZERO; 3];
+    let mut q3 = [FqExt::ZERO; 3];
     for (a, b) in parts {
         for x in 0..3 {
             gf2[x] = gf2[x] + a[x];
@@ -608,14 +609,14 @@ where
 }
 
 pub fn batched_phase_a_round(
-    w: &SoaFq4,
-    apow: &SoaFq4,
-    ea: &SoaFq4,
-    eb: &SoaFq4,
-    lg: &[Fq4],
+    w: &SoaFqExt,
+    apow: &SoaFqExt,
+    ea: &SoaFqExt,
+    eb: &SoaFqExt,
+    lg: &[FqExt],
     half: usize,
     s_len: usize,
-) -> ([Fq4; 3], [Fq4; 3]) {
+) -> ([FqExt; 3], [FqExt; 3]) {
     split_k(lg.len() / 2, half, |lo, hi| {
         #[cfg(target_arch = "x86_64")]
         {
@@ -630,20 +631,20 @@ pub fn batched_phase_a_round(
 }
 
 pub fn batched_phase_a_round_scalar(
-    w: &SoaFq4,
-    apow: &SoaFq4,
-    ea: &SoaFq4,
-    eb: &SoaFq4,
-    lg: &[Fq4],
+    w: &SoaFqExt,
+    apow: &SoaFqExt,
+    ea: &SoaFqExt,
+    eb: &SoaFqExt,
+    lg: &[FqExt],
     half: usize,
     s_len: usize,
     k_lo: usize,
     k_hi: usize,
-) -> ([Fq4; 3], [Fq4; 3]) {
+) -> ([FqExt; 3], [FqExt; 3]) {
     let half_k = lg.len() / 2;
-    let mut gf2 = [Fq4::ZERO; 3];
-    let mut q3 = [Fq4::ZERO; 3];
-    let getm = |t: &SoaFq4, i: usize| [t.c[0][i], t.c[1][i], t.c[2][i], t.c[3][i]];
+    let mut gf2 = [FqExt::ZERO; 3];
+    let mut q3 = [FqExt::ZERO; 3];
+    let getm = |t: &SoaFqExt, i: usize| [t.c[0][i], t.c[1][i], t.c[2][i], t.c[3][i]];
     let tofq = |a: [u64; 4]| Fq4([from_mont(a[0]), from_mont(a[1]), from_mont(a[2]), from_mont(a[3])]);
     for k in k_lo..k_hi {
         let ea_k = getm(ea, k);
@@ -694,13 +695,13 @@ pub fn batched_phase_a_round_scalar(
 
 pub fn batched_phase_a_round0(
     zw: &PackedBits,
-    apow: &SoaFq4,
-    ea: &SoaFq4,
-    eb: &SoaFq4,
-    lg: &[Fq4],
+    apow: &SoaFqExt,
+    ea: &SoaFqExt,
+    eb: &SoaFqExt,
+    lg: &[FqExt],
     half: usize,
     s_len: usize,
-) -> ([Fq4; 3], [Fq4; 3]) {
+) -> ([FqExt; 3], [FqExt; 3]) {
     split_k(lg.len() / 2, half, |lo, hi| {
         #[cfg(target_arch = "x86_64")]
         {
@@ -715,11 +716,11 @@ pub fn batched_phase_a_round0(
 }
 
 #[inline]
-pub fn fold_bits_lut(r: Fq4) -> [Fq4; 4] {
-    [Fq4::ZERO, r, Fq4::ONE - r, Fq4::ONE]
+pub fn fold_bits_lut(r: FqExt) -> [FqExt; 4] {
+    [FqExt::ZERO, r, FqExt::ONE - r, FqExt::ONE]
 }
 
-pub fn fold_bits_to_soa(zw: &PackedBits, half: usize, r: Fq4) -> SoaFq4 {
+pub fn fold_bits_to_soa(zw: &PackedBits, half: usize, r: FqExt) -> SoaFqExt {
     let lut = fold_bits_lut(r);
     let mut c: [Vec<u64>; 4] = Default::default();
     c.par_iter_mut().enumerate().for_each(|(k, arr)| {
@@ -731,24 +732,24 @@ pub fn fold_bits_to_soa(zw: &PackedBits, half: usize, r: Fq4) -> SoaFq4 {
             })
             .collect();
     });
-    SoaFq4 { c }
+    SoaFqExt { c }
 }
 
 pub fn batched_phase_a_round0_scalar(
     zw: &PackedBits,
-    apow: &SoaFq4,
-    ea: &SoaFq4,
-    eb: &SoaFq4,
-    lg: &[Fq4],
+    apow: &SoaFqExt,
+    ea: &SoaFqExt,
+    eb: &SoaFqExt,
+    lg: &[FqExt],
     half: usize,
     s_len: usize,
     k_lo: usize,
     k_hi: usize,
-) -> ([Fq4; 3], [Fq4; 3]) {
+) -> ([FqExt; 3], [FqExt; 3]) {
     let half_k = lg.len() / 2;
-    let mut gf2 = [Fq4::ZERO; 3];
-    let mut q3 = [Fq4::ZERO; 3];
-    let getm = |t: &SoaFq4, i: usize| [t.c[0][i], t.c[1][i], t.c[2][i], t.c[3][i]];
+    let mut gf2 = [FqExt::ZERO; 3];
+    let mut q3 = [FqExt::ZERO; 3];
+    let getm = |t: &SoaFqExt, i: usize| [t.c[0][i], t.c[1][i], t.c[2][i], t.c[3][i]];
     let tofq = |a: [u64; 4]| Fq4([from_mont(a[0]), from_mont(a[1]), from_mont(a[2]), from_mont(a[3])]);
     for k in k_lo..k_hi {
         let ea_k = getm(ea, k);
@@ -791,7 +792,7 @@ pub fn batched_phase_a_round0_scalar(
     (gf2, q3)
 }
 
-pub fn fold(ext: &mut SoaFq4, half: usize, r: Fq4) {
+pub fn fold(ext: &mut SoaFqExt, half: usize, r: FqExt) {
     let rm = [to_mont(r.0[0]), to_mont(r.0[1]), to_mont(r.0[2]), to_mont(r.0[3])];
     #[cfg(target_arch = "x86_64")]
     {
@@ -803,7 +804,7 @@ pub fn fold(ext: &mut SoaFq4, half: usize, r: Fq4) {
     fold_scalar(ext, half, rm);
 }
 
-pub fn bitcheck_evals_scalar(ext: &SoaFq4, eqsuf: &SoaFq4, half: usize) -> (Fq4, Fq4) {
+pub fn bitcheck_evals_scalar(ext: &SoaFqExt, eqsuf: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
     let mut h0 = [0u64; 4];
     let mut h2 = [0u64; 4];
     for i in 0..half {
@@ -822,7 +823,7 @@ pub fn bitcheck_evals_scalar(ext: &SoaFq4, eqsuf: &SoaFq4, half: usize) -> (Fq4,
     )
 }
 
-pub fn fold_scalar(ext: &mut SoaFq4, half: usize, rm: [u64; 4]) {
+pub fn fold_scalar(ext: &mut SoaFqExt, half: usize, rm: [u64; 4]) {
     for i in 0..half {
         let lo = [ext.c[0][i], ext.c[1][i], ext.c[2][i], ext.c[3][i]];
         let hi = [ext.c[0][i + half], ext.c[1][i + half], ext.c[2][i + half], ext.c[3][i + half]];
@@ -874,7 +875,7 @@ mod tests {
         use crate::mle::eq_table;
         let mut rng = SimpleRng::new(5);
         for nv in [1usize, 3, 5] {
-            let tau: Vec<Fq4> = (0..nv).map(|_| rng.next_fq4()).collect();
+            let tau: Vec<FqExt> = (0..nv).map(|_| rng.next_fq4()).collect();
             let want = eq_table(&tau);
             let got = eq_table_mont(&tau);
             assert_eq!(got.len(), want.len());
@@ -890,16 +891,16 @@ mod tests {
         for (ea_n, eb_n) in [(1usize, 4usize), (4, 8), (8, 8), (2, 16)] {
             let half = ea_n * eb_n;
             let n = 2 * half;
-            let ext_aos: Vec<Fq4> = (0..n).map(|_| rng.next_fq4()).collect();
-            let ea_aos: Vec<Fq4> = (0..ea_n).map(|_| rng.next_fq4()).collect();
-            let eb_aos: Vec<Fq4> = (0..eb_n).map(|_| rng.next_fq4()).collect();
-            let eqsuf: Vec<Fq4> =
+            let ext_aos: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+            let ea_aos: Vec<FqExt> = (0..ea_n).map(|_| rng.next_fq4()).collect();
+            let eb_aos: Vec<FqExt> = (0..eb_n).map(|_| rng.next_fq4()).collect();
+            let eqsuf: Vec<FqExt> =
                 (0..half).map(|c| ea_aos[c / eb_n] * eb_aos[c % eb_n]).collect();
 
-            let ext = SoaFq4::from_aos(&ext_aos);
-            let ea = SoaFq4::from_aos(&ea_aos);
-            let eb = SoaFq4::from_aos(&eb_aos);
-            let eqm = SoaFq4::from_aos(&eqsuf);
+            let ext = SoaFqExt::from_aos(&ext_aos);
+            let ea = SoaFqExt::from_aos(&ea_aos);
+            let eb = SoaFqExt::from_aos(&eb_aos);
+            let eqm = SoaFqExt::from_aos(&eqsuf);
 
             let want = bitcheck_evals(&ext, &eqm, half);
             let got_s = bitcheck_evals_split_scalar(&ext, &ea, &eb, half);
@@ -914,30 +915,30 @@ mod tests {
         let mut rng = SimpleRng::new(3);
         for &half in &[1usize, 3, 4, 7, 16, 33, 64] {
             let n = 2 * half;
-            let ext_aos: Vec<Fq4> = (0..n).map(|_| rng.next_fq4()).collect();
-            let eq_aos: Vec<Fq4> = (0..half).map(|_| rng.next_fq4()).collect();
+            let ext_aos: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+            let eq_aos: Vec<FqExt> = (0..half).map(|_| rng.next_fq4()).collect();
             let r = rng.next_fq4();
             let rm = [to_mont(r.0[0]), to_mont(r.0[1]), to_mont(r.0[2]), to_mont(r.0[3])];
-            let eqsuf = SoaFq4::from_aos(&eq_aos);
+            let eqsuf = SoaFqExt::from_aos(&eq_aos);
 
-            let e = SoaFq4::from_aos(&ext_aos);
+            let e = SoaFqExt::from_aos(&ext_aos);
             let hs = bitcheck_evals_scalar(&e, &eqsuf, half);
             let hd = bitcheck_evals(&e, &eqsuf, half);
             assert_eq!(hs, hd, "evals mismatch at half={half}");
-            let mut ref0 = Fq4::ZERO;
-            let mut ref2 = Fq4::ZERO;
+            let mut ref0 = FqExt::ZERO;
+            let mut ref2 = FqExt::ZERO;
             for i in 0..half {
                 let lo = e.get(i);
                 let hi = e.get(i + half);
                 let z2 = hi + (hi - lo);
-                ref0 = ref0 + eq_aos[i] * (lo * (lo - Fq4::ONE));
-                ref2 = ref2 + eq_aos[i] * (z2 * (z2 - Fq4::ONE));
+                ref0 = ref0 + eq_aos[i] * (lo * (lo - FqExt::ONE));
+                ref2 = ref2 + eq_aos[i] * (z2 * (z2 - FqExt::ONE));
             }
             assert_eq!(hd, (ref0, ref2), "evals vs definition at half={half}");
 
-            let mut e1 = SoaFq4::from_aos(&ext_aos);
+            let mut e1 = SoaFqExt::from_aos(&ext_aos);
             fold_scalar(&mut e1, half, rm);
-            let mut e2 = SoaFq4::from_aos(&ext_aos);
+            let mut e2 = SoaFqExt::from_aos(&ext_aos);
             fold(&mut e2, half, r);
             for i in 0..half {
                 let lo = ext_aos[i];

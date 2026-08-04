@@ -1,3 +1,4 @@
+
 pub const RATE: usize = 168;
 
 const RC: [u64; 24] = [
@@ -143,7 +144,7 @@ mod tests {
     fn keccak_matches_official_vectors() {
         let mut st = [0u64; 25];
         keccak_f(&mut st);
-        assert_eq!(st[0], 0xF1258F7940E1DDE7, "keccak_f 在全零狀態的 lane 0");
+        assert_eq!(st[0], 0xF1258F7940E1DDE7, "keccak_f lane 0 on the all-zero state");
 
         assert_eq!(
             hex(&shake128(b"", 32)),
@@ -183,7 +184,7 @@ mod tests {
         keccak_f(&mut b);
         assert_ne!(a, b);
         let diff = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-        assert!(diff >= 20, "雪崩不足：只有 {diff}/25 個 lane 改變");
+        assert!(diff >= 20, "insufficient avalanche: only {diff}/25 lanes changed");
     }
 
     #[test]

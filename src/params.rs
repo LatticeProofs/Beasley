@@ -1,35 +1,54 @@
-use crate::ntt::{neg_inner_product, to_spectra, Spectra};
-use crate::ring::{gadget_decompose, RingElem, DELTA, N};
-use crate::transcript::SimpleRng;
+
+use crate::ntt::{to_spectra, Spectra};
+use crate::ring::{RingElem, GADGET_LEN, N};
+use crate::rng::CsRng;
 use rayon::prelude::*;
+
+#[cfg(feature = "q32")]
+pub const ELL: usize = 3;
+#[cfg(feature = "q64")]
+pub const ELL: usize = 5;
+
+pub const fn ml_of(ell: usize) -> usize {
+    ell * GADGET_LEN
+}
 
 pub struct HashParams {
     pub n_bits: usize,
     pub group_bits: usize,
     pub ell: usize,
-    pub a0: Vec<RingElem>,
-    pub a1: Vec<RingElem>,
     pub table: Vec<Vec<RingElem>>,
+    spectra_cache: Option<Vec<Vec<Spectra>>>,
     pub crs_digest: [u8; 32],
 }
 
 impl HashParams {
     pub fn sample(seed: u64, n_bits: usize, group_bits: usize, ell: usize) -> Self {
-        assert!(group_bits >= 1 && group_bits.is_power_of_two(), "g 必須是 2 的冪");
-        assert!(n_bits % group_bits == 0, "g 必須整除 n_bits");
-        assert!(n_bits / group_bits >= 2, "至少要兩群");
-        assert!(1 <= ell && ell <= DELTA);
-        let mut rng = SimpleRng::new(seed);
-        let mut sample_vec = || {
-            (0..DELTA)
-                .map(|_| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() })
-                .collect::<Vec<_>>()
-        };
-        let a0 = sample_vec();
-        let a1 = sample_vec();
-        let table = precompute_table(&a0, &a1, group_bits);
-        let crs_digest = crs_digest(n_bits, group_bits, ell, &a0, &a1);
-        HashParams { n_bits, group_bits, ell, a0, a1, table, crs_digest }
+        assert!(group_bits >= 1, "g must be at least 1");
+        assert!(n_bits % group_bits == 0, "g must divide n_bits");
+        assert!(n_bits / group_bits >= 2, "need at least two groups");
+        assert!(ell >= 1, "module rank must be at least 1");
+        let tsz = 1usize << group_bits;
+        let dims = crs_dims(n_bits, group_bits, ell, tsz);
+        let cells = ell * ml_of(ell);
+
+        let table: Vec<Vec<RingElem>> = (0..tsz)
+            .into_par_iter()
+            .map(|v| {
+                let mut rng =
+                    CsRng::from_parts("voprf-crs-table-v2", &[&seed.to_le_bytes(), &dims, &v.to_le_bytes()]);
+                (0..cells)
+                    .map(|_| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() })
+                    .collect()
+            })
+            .collect();
+
+        let crs_digest = crs_digest(n_bits, group_bits, ell, &table);
+        let mut p = HashParams { n_bits, group_bits, ell, table, spectra_cache: None, crs_digest };
+        if std::env::var_os("VOPRF_CACHE_SPECTRA").is_some() {
+            p.precompute_spectra();
+        }
+        p
     }
 
     pub fn num_groups(&self) -> usize {
@@ -37,7 +56,34 @@ impl HashParams {
     }
 
     pub fn table_size(&self) -> usize {
-        1 << self.group_bits
+        self.table.len()
+    }
+
+    pub fn ml(&self) -> usize {
+        ml_of(self.ell)
+    }
+
+    pub fn a(&self, v: usize, r: usize, d: usize) -> &RingElem {
+        debug_assert!(r < self.ell && d < self.ml());
+        &self.table[v][r * self.ml() + d]
+    }
+
+    pub fn precompute_spectra(&mut self) {
+        if self.spectra_cache.is_none() {
+            self.spectra_cache =
+                Some(self.table.par_iter().map(|m| m.iter().map(|e| to_spectra(&e.c)).collect()).collect());
+        }
+    }
+
+    pub fn spectra_cached(&self) -> bool {
+        self.spectra_cache.is_some()
+    }
+
+    pub fn spectra_get(&self, v: usize) -> std::borrow::Cow<'_, [Spectra]> {
+        match &self.spectra_cache {
+            Some(c) => std::borrow::Cow::Borrowed(&c[v]),
+            None => std::borrow::Cow::Owned(self.spectra_for(v)),
+        }
     }
 
     pub fn entry(&self, v: usize) -> &[RingElem] {
@@ -49,97 +95,109 @@ impl HashParams {
     }
 }
 
+fn crs_dims(n_bits: usize, group_bits: usize, ell: usize, tsz: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48);
+    for v in [n_bits as u64, group_bits as u64, ell as u64, tsz as u64, GADGET_LEN as u64, N as u64] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
 pub fn crs_digest(
     n_bits: usize,
     group_bits: usize,
     ell: usize,
-    a0: &[RingElem],
-    a1: &[RingElem],
+    table: &[Vec<RingElem>],
 ) -> [u8; 32] {
-    let mut tr = crate::transcript::Transcript::new("voprf-crs-v1");
+    let mut tr = crate::transcript::Transcript::new("voprf-crs-v3-module-rank");
     tr.absorb_u64(n_bits as u64);
     tr.absorb_u64(group_bits as u64);
     tr.absorb_u64(ell as u64);
-    tr.absorb_u64(DELTA as u64);
+    tr.absorb_u64(ml_of(ell) as u64);
+    tr.absorb_u64(GADGET_LEN as u64);
     tr.absorb_u64(N as u64);
-    for a in a0.iter().chain(a1) {
-        tr.absorb_fqs(&a.c);
+    tr.absorb_u64(table.len() as u64);
+    for row in table {
+        for e in row {
+            tr.absorb_fqs(&e.c);
+        }
     }
     tr.finalize_digest()
-}
-
-pub fn precompute_table(a0: &[RingElem], a1: &[RingElem], group_bits: usize) -> Vec<Vec<RingElem>> {
-    let mut cur: Vec<Vec<RingElem>> = vec![a0.to_vec(), a1.to_vec()];
-    let mut leaves = 1usize;
-    while leaves < group_bits {
-        let half = cur.len();
-        let specs: Vec<Vec<Spectra>> =
-            cur.iter().map(|p| p.iter().map(|e| to_spectra(&e.c)).collect()).collect();
-        let digits: Vec<Vec<Vec<RingElem>>> =
-            cur.iter().map(|q| q.iter().map(gadget_decompose).collect()).collect();
-
-        let next: Vec<Vec<RingElem>> = (0..half * half)
-            .into_par_iter()
-            .map(|v| {
-                let (w, wp) = (v / half, v % half);
-                (0..DELTA).map(|col| neg_inner_product(&specs[w], &digits[wp][col])).collect()
-            })
-            .collect();
-        cur = next;
-        leaves *= 2;
-    }
-    cur
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ring::gadget_recompose;
+    use crate::ring::{gadget_decompose, gadget_recompose};
 
-    fn direct(a: &[Vec<RingElem>], v: usize, bits: usize) -> Vec<RingElem> {
-        if bits == 1 {
-            return a[v].clone();
+    #[test]
+    fn table_rows_are_independent() {
+        let p = HashParams::sample(1, 8, 4, 2);
+        assert_eq!(p.table_size(), 16);
+        assert_eq!(p.ml(), 2 * GADGET_LEN);
+        assert!(p.table.iter().all(|r| r.len() == p.ell * p.ml()));
+        for a in 0..p.table_size() {
+            for b in (a + 1)..p.table_size() {
+                assert_ne!(p.table[a], p.table[b], "matrix {a} is identical to matrix {b}");
+            }
         }
-        let half = bits / 2;
-        let (w, wp) = (v >> half, v & ((1 << half) - 1));
-        let left = direct(a, w, half);
-        let right = direct(a, wp, half);
-        (0..DELTA)
-            .map(|col| {
-                let m = gadget_decompose(&right[col]);
+        let half = 4usize;
+        let (w, wp) = (2usize, 3usize);
+        let ml = p.ml();
+        let mut combined: Vec<RingElem> = Vec::with_capacity(p.ell * ml);
+        for r in 0..p.ell {
+            for col in 0..ml {
                 let mut acc = RingElem::zero();
-                for d in 0..DELTA {
-                    acc = &acc + &(&left[d] * &m[d]);
+                for t in 0..p.ell {
+                    let dg = gadget_decompose(p.a(wp, t, col));
+                    for c in 0..GADGET_LEN {
+                        acc = &acc + &(p.a(w, r, t * GADGET_LEN + c) * &dg[c]);
+                    }
                 }
-                acc
-            })
-            .collect()
-    }
-
-    #[test]
-    fn table_g1_is_a0_a1() {
-        let p = HashParams::sample(1, 8, 1, 1);
-        assert_eq!(p.table_size(), 2);
-        assert_eq!(p.table[0], p.a0);
-        assert_eq!(p.table[1], p.a1);
-    }
-
-    #[test]
-    fn table_matches_direct_recursion() {
-        let p = HashParams::sample(2, 8, 4, 1);
-        let leaves = vec![p.a0.clone(), p.a1.clone()];
-        assert_eq!(p.table.len(), 16);
-        for v in [0usize, 5, 11, 15] {
-            assert_eq!(p.table[v], direct(&leaves, v, 4), "v = {v}");
+                combined.push(acc);
+            }
         }
+        assert_ne!(p.table[w * half + wp], combined, "table still looks combined (e(T) would fall back to 2)");
+    }
+
+    #[test]
+    fn sampling_is_deterministic_and_domain_separated() {
+        let a = HashParams::sample(7, 8, 4, 1);
+        let b = HashParams::sample(7, 8, 4, 1);
+        assert_eq!(a.table, b.table);
+        assert_eq!(a.crs_digest, b.crs_digest);
+        let c = HashParams::sample(8, 8, 4, 1);
+        assert_ne!(a.table, c.table);
+        assert_ne!(a.crs_digest, c.crs_digest);
+        let d = HashParams::sample(7, 8, 4, 2);
+        assert_ne!(a.crs_digest, d.crs_digest);
+        assert_ne!(a.table, d.table, "ell must also be part of the sampling domain");
+    }
+
+    #[test]
+    fn table_coefficients_are_uniform_over_range() {
+        let p = HashParams::sample(11, 8, 2, 1);
+        let (mut hi, mut total) = (0usize, 0usize);
+        for row in &p.table {
+            for e in row {
+                for c in &e.c {
+                    assert!((c.0 as u64) < crate::field::Q, "out of range [0,q)");
+                    if (c.0 as u64) >= crate::field::Q / 2 {
+                        hi += 1;
+                    }
+                    total += 1;
+                }
+            }
+        }
+        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "upper-half ratio {hi}/{total}");
     }
 
     #[test]
     fn gadget_roundtrip_on_table() {
-        let p = HashParams::sample(3, 8, 2, 1);
+        let p = HashParams::sample(3, 8, 2, 2);
         for v in 0..p.table_size() {
-            for d in 0..DELTA {
-                assert_eq!(gadget_recompose(&gadget_decompose(&p.table[v][d])), p.table[v][d]);
+            for e in &p.table[v] {
+                assert_eq!(gadget_recompose(&gadget_decompose(e)), *e);
             }
         }
     }

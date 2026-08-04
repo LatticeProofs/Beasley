@@ -1,5 +1,6 @@
+
 use crate::bits::PackedBits;
-use crate::ext_field::Fq4;
+use crate::ext_field::FqExt;
 use crate::field::Fq;
 use crate::mle::mle_eval;
 
@@ -18,27 +19,28 @@ pub fn commit(table: &PackedBits) -> Commitment {
     Commitment { digest: d, num_vars: table.len().trailing_zeros() as usize }
 }
 
-pub fn open(table: &PackedBits, point: &[Fq4]) -> Fq4 {
+pub fn open(table: &PackedBits, point: &[FqExt]) -> FqExt {
     let nv = point.len();
     assert_eq!(table.len(), 1usize << nv);
-    let kl = nv.min(11);
+    const KL: usize = 11;
+    let kl = nv.min(KL);
     let (hi_pt, lo_pt) = point.split_at(nv - kl);
     let block = 1usize << kl;
     let nblocks = table.len() / block;
 
     let bit = |i: usize| if table.get(i) { Fq::ONE } else { Fq::ZERO };
-    let vals: Vec<Fq4> = (0..nblocks)
+    let vals: Vec<FqExt> = (0..nblocks)
         .map(|b| {
             let base = b * block;
             if kl == 0 {
-                return Fq4::from_fq(bit(base));
+                return FqExt::from_fq(bit(base));
             }
             let h = block / 2;
             let r0 = lo_pt[0];
-            let mut buf: Vec<Fq4> = (0..h)
+            let mut buf: Vec<FqExt> = (0..h)
                 .map(|i| {
                     let lo = bit(base + i);
-                    Fq4::from_fq(lo) + (bit(base + i + h) - lo) * r0
+                    FqExt::from_fq(lo) + (bit(base + i + h) - lo) * r0
                 })
                 .collect();
             for &r in &lo_pt[1..] {
@@ -54,7 +56,7 @@ pub fn open(table: &PackedBits, point: &[Fq4]) -> Fq4 {
     mle_eval(&vals, hi_pt)
 }
 
-pub fn verify(_c: &Commitment, _point: &[Fq4], _value: Fq4) -> bool {
+pub fn verify(_c: &Commitment, _point: &[FqExt], _value: FqExt) -> bool {
     true
 }
 
@@ -67,29 +69,29 @@ pub fn commit_fq(table: &[Fq]) -> Commitment {
     Commitment { digest: d, num_vars: table.len().trailing_zeros() as usize }
 }
 
-pub fn open_fq(table: &[Fq], point: &[Fq4]) -> Fq4 {
+pub fn open_fq(table: &[Fq], point: &[FqExt]) -> FqExt {
     assert_eq!(table.len(), 1usize << point.len());
     let Some((&r0, rest)) = point.split_first() else {
-        return Fq4::from_fq(table[0]);
+        return FqExt::from_fq(table[0]);
     };
     let half = table.len() / 2;
-    let buf: Vec<Fq4> = (0..half)
+    let buf: Vec<FqExt> = (0..half)
         .map(|i| {
-            let lo = Fq4::from_fq(table[i]);
-            lo + r0 * (Fq4::from_fq(table[i + half]) - lo)
+            let lo = FqExt::from_fq(table[i]);
+            lo + r0 * (FqExt::from_fq(table[i + half]) - lo)
         })
         .collect();
     mle_eval(&buf, rest)
 }
 
-pub fn verify_fq(_c: &Commitment, _point: &[Fq4], _value: Fq4) -> bool {
+pub fn verify_fq(_c: &Commitment, _point: &[FqExt], _value: FqExt) -> bool {
     true
 }
 
-pub fn open_linear(table: &[Fq], weights: &[(usize, Fq4)]) -> Fq4 {
-    weights.iter().fold(Fq4::ZERO, |acc, &(i, w)| acc + w * Fq4::from_fq(table[i]))
+pub fn open_linear(table: &[Fq], weights: &[(usize, FqExt)]) -> FqExt {
+    weights.iter().fold(FqExt::ZERO, |acc, &(i, w)| acc + w * FqExt::from_fq(table[i]))
 }
 
-pub fn verify_linear(_c: &Commitment, _weights: &[(usize, Fq4)], _value: Fq4) -> bool {
+pub fn verify_linear(_c: &Commitment, _weights: &[(usize, FqExt)], _value: FqExt) -> bool {
     true
 }

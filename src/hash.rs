@@ -1,21 +1,26 @@
+
 use crate::field::Fq;
-use crate::ntt::neg_and_quotient;
+use crate::ntt::neg_and_quotient_rows;
 use crate::params::HashParams;
-use crate::ring::{gadget_decompose, RingElem, DELTA};
+use crate::ring::{gadget_decompose, RingElem};
 use rayon::prelude::*;
 
 pub struct HashWitness {
-    pub m: Vec<Vec<Vec<RingElem>>>,
+    pub m: Vec<Vec<RingElem>>,
     pub t: Vec<Vec<Vec<Fq>>>,
 }
 
 impl HashWitness {
-    pub fn column(&self, j: usize, i: usize) -> &[RingElem] {
-        &self.m[j][i - 2]
+    pub fn column(&self, i: usize) -> &[RingElem] {
+        &self.m[i - 2]
     }
-    pub fn quotient(&self, j: usize, i: usize) -> &[Fq] {
-        &self.t[j][i - 2]
+    pub fn quotient(&self, r: usize, i: usize) -> &[Fq] {
+        &self.t[i - 2][r]
     }
+}
+
+pub fn gadget_decompose_vec(y: &[RingElem]) -> Vec<RingElem> {
+    y.iter().flat_map(|e| gadget_decompose(e)).collect()
 }
 
 pub fn bits_to_groups(params: &HashParams, bits: &[bool]) -> Vec<usize> {
@@ -41,50 +46,50 @@ pub fn eval_h(params: &HashParams, groups: &[usize]) -> (Vec<RingElem>, HashWitn
     assert_eq!(groups.len(), ng);
     assert!(groups.iter().all(|&v| v < params.table_size()));
 
-    let specs: Vec<_> = groups.par_iter().map(|&v| params.spectra_for(v)).collect();
+    let specs: Vec<_> = groups.par_iter().map(|&v| params.spectra_get(v)).collect();
 
-    let mut outputs = Vec::with_capacity(params.ell);
-    let mut m_all = Vec::with_capacity(params.ell);
-    let mut t_all = Vec::with_capacity(params.ell);
+    let mut y: Vec<RingElem> =
+        (0..params.ell).map(|r| params.a(groups[ng - 1], r, 0).clone()).collect();
 
-    for j in 0..params.ell {
-        let mut w = params.table[groups[ng - 1]][j].clone();
-        let mut m_desc: Vec<Vec<RingElem>> = Vec::with_capacity(ng - 1);
-        let mut t_desc: Vec<Vec<Fq>> = Vec::with_capacity(ng - 1);
-        for i in (1..=ng - 1).rev() {
-            let col = gadget_decompose(&w);
-            let (next, t) = neg_and_quotient(&specs[i - 1], &col);
-            m_desc.push(col);
-            t_desc.push(t);
-            w = next;
-        }
-        m_desc.reverse();
-        t_desc.reverse();
-        outputs.push(w);
-        m_all.push(m_desc);
-        t_all.push(t_desc);
+    let mut m_desc: Vec<Vec<RingElem>> = Vec::with_capacity(ng - 1);
+    let mut t_desc: Vec<Vec<Vec<Fq>>> = Vec::with_capacity(ng - 1);
+    for i in (1..=ng - 1).rev() {
+        let md = gadget_decompose_vec(&y);
+        let (next, ts): (Vec<RingElem>, Vec<Vec<Fq>>) =
+            neg_and_quotient_rows(&specs[i - 1], params.ell, &md).into_iter().unzip();
+        m_desc.push(md);
+        t_desc.push(ts);
+        y = next;
     }
+    m_desc.reverse();
+    t_desc.reverse();
 
-    (outputs, HashWitness { m: m_all, t: t_all })
+    (y, HashWitness { m: m_desc, t: t_desc })
 }
 
 pub fn eval_h_naive(params: &HashParams, groups: &[usize]) -> Vec<RingElem> {
     let ng = params.num_groups();
     assert_eq!(groups.len(), ng);
+    let (m, ml) = (params.ell, params.ml());
 
-    let mut w: Vec<RingElem> = params.table[groups[ng - 1]].clone();
+    let mut z: Vec<RingElem> = params.table[groups[ng - 1]].clone();
     for i in (1..=ng - 1).rev() {
-        let a = &params.table[groups[i - 1]];
-        let mut next = vec![RingElem::zero(); DELTA];
-        for col in 0..DELTA {
-            let m_col = gadget_decompose(&w[col]);
-            for d in 0..DELTA {
-                next[col] = &next[col] + &(&a[d] * &m_col[d]);
+        let v = groups[i - 1];
+        let gi: Vec<Vec<RingElem>> = (0..ml)
+            .map(|col| gadget_decompose_vec(&(0..m).map(|t| z[t * ml + col].clone()).collect::<Vec<_>>()))
+            .collect();
+        let mut next = vec![RingElem::zero(); m * ml];
+        for r in 0..m {
+            for col in 0..ml {
+                let mut acc = RingElem::zero();
+                for d in 0..ml {
+                    acc = &acc + &(params.a(v, r, d) * &gi[col][d]);
+                }
+                next[r * ml + col] = acc;
             }
         }
-        w = next;
+        z = next;
     }
 
-    w.truncate(params.ell);
-    w
+    (0..m).map(|r| z[r * ml].clone()).collect()
 }

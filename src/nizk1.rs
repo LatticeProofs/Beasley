@@ -1,26 +1,46 @@
+
 use crate::field::Fq;
 use crate::hash::HashWitness;
-use crate::ntt::{full_inner_product, to_spectra};
+use crate::ntt::{full_inner_product, neg_and_quotient_rows, to_spectra, Spectra};
 use crate::params::HashParams;
 use crate::ring::{reduce_only, RingElem, N};
 use crate::rng::CsRng;
 
-pub const HPACK_BITS: usize = 1024;
+#[cfg(feature = "q32")]
+pub const R_DIM: usize = 6;
+#[cfg(feature = "q64")]
+pub const R_DIM: usize = 10;
+#[cfg(feature = "q32")]
+pub const COM_N: usize = 6;
+#[cfg(feature = "q64")]
+pub const COM_N: usize = 5;
+#[cfg(feature = "q32")]
+pub const W_SLACK: usize = 3;
+#[cfg(feature = "q64")]
+pub const W_SLACK: usize = 5;
+
+pub const HPACK_BITS: usize = 512;
+
+const _: () = assert!(HPACK_BITS.is_power_of_two() && HPACK_BITS <= N, "an h_pack row does not fit in a single ring element");
 
 pub struct ComKey {
     pub a: Vec<Vec<RingElem>>,
     pub b: Vec<Vec<RingElem>>,
+    spec: Vec<Spectra>,
 }
 
 impl ComKey {
     pub fn sample(rng: &mut CsRng, com_n: usize, msg_len: usize, w: usize) -> Self {
         let rho_len = com_n + msg_len + w;
-        assert!(rho_len > com_n + msg_len, "Appendix F 的 hiding 需要 w ≥ 1");
+        assert!(rho_len > com_n + msg_len, "Appendix F hiding requires w >= 1");
         let re = |rng: &mut CsRng| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() };
-        ComKey {
-            a: (0..com_n).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect(),
-            b: (0..msg_len).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect(),
-        }
+        let a: Vec<Vec<RingElem>> =
+            (0..com_n).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect();
+        let b: Vec<Vec<RingElem>> =
+            (0..msg_len).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect();
+        let spec: Vec<Spectra> =
+            a.iter().chain(&b).flat_map(|row| row.iter()).map(|e| to_spectra(&e.c)).collect();
+        ComKey { a, b, spec }
     }
     pub fn com_n(&self) -> usize {
         self.a.len()
@@ -37,12 +57,12 @@ impl ComKey {
 }
 
 pub fn derive_ar(r_dim: usize, ell: usize, c_r: &[RingElem]) -> Vec<Vec<RingElem>> {
-    let mut enc = Vec::with_capacity(c_r.len() * N * 4);
+    let mut enc = Vec::with_capacity(c_r.len() * N * crate::field::FQ_BYTES);
     for e in c_r {
         debug_assert_eq!(e.c.len(), N);
         for c in &e.c {
-            debug_assert!((c.0 as u64) < crate::field::Q, "c_r 的係數必須是 canonical 代表");
-            enc.extend_from_slice(&c.0.to_le_bytes());
+            debug_assert!((c.0 as u64) < crate::field::Q, "c_r coefficients must be canonical representatives");
+            enc.extend_from_slice(&crate::field::fq_le_bytes(*c));
         }
     }
     let mut dims = Vec::with_capacity(24);
@@ -89,9 +109,9 @@ impl Nizk1Params {
     pub fn sample(seed: u64, params: &HashParams, r_dim: usize, com_n: usize, w: usize) -> Self {
         let mut rng = CsRng::from_parts("voprf-nizk1-crs-v1", &[&seed.to_le_bytes()]);
         let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        assert!(h_cells.is_power_of_two(), "h_cells = g_pad·2^g 必須是 2 的冪（hpack 索引的前提）");
+        assert!(h_cells.is_power_of_two(), "h_cells = g_pad*2^g must be a power of two (precondition for hpack indexing)");
         let hpack_len = h_cells.div_ceil(HPACK_BITS).max(1);
-        debug_assert!(hpack_len.is_power_of_two(), "hpack_len 必須是 2 的冪（見 hpack_bits）");
+        debug_assert!(hpack_len.is_power_of_two(), "hpack_len must be a power of two (see hpack_bits)");
         let com_r = ComKey::sample(&mut rng, com_n, 2 * r_dim, w);
         let com_x = ComKey::sample(&mut rng, com_n, hpack_len, w);
         let crs_digest = nizk1_crs_digest(r_dim, hpack_len, &com_r, &com_x);
@@ -236,16 +256,23 @@ fn commit(
     rho_neg: &[RingElem],
     msg: &[RingElem],
 ) -> (Vec<RingElem>, Vec<Vec<Fq>>) {
-    let mut out = Vec::with_capacity(ck.out_len());
-    let mut qs = Vec::with_capacity(ck.out_len());
-    for row in &ck.a {
-        let (red, hi) = lin_with_quotient(row, rho_pos, rho_neg, false);
+    let rows = ck.out_len();
+    let rp = neg_and_quotient_rows(&ck.spec, rows, rho_pos);
+    let rn = neg_and_quotient_rows(&ck.spec, rows, rho_neg);
+
+    let mut out = Vec::with_capacity(rows);
+    let mut qs = Vec::with_capacity(rows);
+    for (i, ((red_p, t_p), (red_n, t_n))) in rp.into_iter().zip(rn).enumerate() {
+        let mut red = &red_p - &red_n;
+        let mut hi: Vec<Fq> = t_n.iter().zip(&t_p).map(|(&a, &b)| a - b).collect();
+        if i >= ck.com_n() {
+            red = &red + &red;
+            for v in hi.iter_mut() {
+                *v = *v + *v;
+            }
+            red = &red + &msg[i - ck.com_n()];
+        }
         out.push(red);
-        qs.push(hi);
-    }
-    for (i, row) in ck.b.iter().enumerate() {
-        let (red, hi) = lin_with_quotient(row, rho_pos, rho_neg, true);
-        out.push(&red + &msg[i]);
         qs.push(hi);
     }
     (out, qs)
@@ -275,7 +302,7 @@ pub fn check_blind(
 
 pub const ZK_MASK_ROWS: usize = 1;
 
-const _: () = assert!(ZK_MASK_ROWS >= 1, "ZK 的 witness-level 遮罩至少需要一行");
+const _: () = assert!(ZK_MASK_ROWS >= 1, "the witness-level ZK mask needs at least one row");
 
 pub fn zk_mask_rows(rng: &mut CsRng) -> Vec<RingElem> {
     rand_bits(rng, ZK_MASK_ROWS)
@@ -361,11 +388,11 @@ mod tests {
         let a = sample_blind(&insecure_test_secret(1), 0, &nz, &hb);
         let b = sample_blind(&insecure_test_secret(2), 0, &nz, &hb);
         let a2 = sample_blind(&insecure_test_secret(1), 0, &nz, &hb);
-        assert_eq!(a.r_pos, a2.r_pos, "同 secret 必須決定性");
+        assert_eq!(a.r_pos, a2.r_pos, "the same secret must be deterministic");
         assert_eq!(a.rho_x_pos, a2.rho_x_pos);
-        assert_ne!(a.r_pos, b.r_pos, "不同 secret ⇒ 不同 R⁺");
-        assert_ne!(a.rho_r_pos, b.rho_r_pos, "不同 secret ⇒ 不同 ρ_r⁺");
-        assert_ne!(a.rho_x_pos, b.rho_x_pos, "不同 secret ⇒ 不同 ρ_x⁺");
+        assert_ne!(a.r_pos, b.r_pos, "different secret => different R+");
+        assert_ne!(a.rho_r_pos, b.rho_r_pos, "different secret => different rho_r+");
+        assert_ne!(a.rho_x_pos, b.rho_x_pos, "different secret => different rho_x+");
         assert_ne!(a.r_pos, a.r_neg);
         assert_ne!(a.rho_r_pos, a.rho_x_pos);
     }
@@ -381,10 +408,10 @@ mod tests {
         for i in 0..ws.len() {
             assert_eq!(ws[i].counter, i as u64);
             for k in (i + 1)..ws.len() {
-                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}：R⁺ 相同");
-                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}：R⁻ 相同");
-                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}：ρ_r⁺ 相同");
-                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}：ρ_x⁺ 相同");
+                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}: identical R+");
+                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}: identical R-");
+                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}: identical rho_r+");
+                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}: identical rho_x+");
             }
         }
         assert_eq!(ws[1].r_pos, sample_blind(&secret, 1, &nz, &hb).r_pos);
@@ -409,13 +436,13 @@ mod tests {
                 .iter()
                 .flat_map(|e| e.c.iter())
                 .map(|c| {
-                    assert!(c.0 <= 1, "{name} 不是 bit");
+                    assert!(c.0 <= 1, "{name} is not a bit");
                     c.0 as usize
                 })
                 .sum();
             assert!(
                 ones > total * 40 / 100 && ones < total * 60 / 100,
-                "{name} 不平衡：{ones}/{total}"
+                "{name} imbalance: {ones}/{total}"
             );
         }
     }
@@ -449,26 +476,26 @@ mod tests {
     #[test]
     fn ar_is_derived_from_cr() {
         let mut cr: Vec<RingElem> = (0..3)
-            .map(|i| RingElem { c: (0..N).map(|k| Fq((i * 7 + k) as u32 % 1000)).collect() })
+            .map(|i| RingElem { c: (0..N).map(|k| Fq(((i * 7 + k) as u64 % 1000) as _)).collect() })
             .collect();
         let a = derive_ar(2, 3, &cr);
-        assert_eq!(a, derive_ar(2, 3, &cr), "同輸入必須決定性");
+        assert_eq!(a, derive_ar(2, 3, &cr), "the same input must be deterministic");
         cr[1].c[500] = cr[1].c[500] + Fq::ONE;
         let b = derive_ar(2, 3, &cr);
-        assert_ne!(a, b, "改 c_r 之後 A_r 竟然沒變");
+        assert_ne!(a, b, "A_r did not change after modifying c_r");
         assert_ne!(derive_ar(2, 3, &cr)[0][0], derive_ar(3, 2, &cr)[0][0]);
     }
 
     #[test]
     fn ar_coefficients_are_uniform_over_range() {
         let cr: Vec<RingElem> =
-            (0..2).map(|_| RingElem { c: (0..N).map(|k| Fq(k as u32)).collect() }).collect();
+            (0..2).map(|_| RingElem { c: (0..N).map(|k| Fq(k as _)).collect() }).collect();
         let a = derive_ar(2, 2, &cr);
         let (mut hi, mut total) = (0usize, 0usize);
         for row in &a {
             for e in row {
                 for c in &e.c {
-                    assert!((c.0 as u64) < crate::field::Q, "超出 [0,q)");
+                    assert!((c.0 as u64) < crate::field::Q, "out of range [0,q)");
                     if (c.0 as u64) >= crate::field::Q / 2 {
                         hi += 1;
                     }
@@ -476,7 +503,7 @@ mod tests {
                 }
             }
         }
-        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "高半區佔比 {hi}/{total}");
+        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "upper-half ratio {hi}/{total}");
     }
 }
 

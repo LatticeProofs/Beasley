@@ -1,30 +1,47 @@
-use crate::field::{reduce64, Fq, Q};
-use crate::ring::RingElem;
+
+use crate::field::{Fq, Q};
+use crate::ring::{RingElem, GADGET_BASE, N};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 use tfhe_ntt::prime32::Plan;
 
-const N: usize = 1536;
-const L: usize = 4096;
+const L: usize = 2 * N;
+
+#[cfg(feature = "q32")]
 const PRIMES: [u64; 3] = [2013265921, 2147377153, 2147352577];
+#[cfg(feature = "q64")]
+const PRIMES: [u64; 5] =
+    [2147473409, 2147389441, 2147387393, 2147377153, 2147358721];
+
+const _: () = assert!(L.is_power_of_two());
+const _: () = {
+    let mut i = 0;
+    while i < PRIMES.len() {
+        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support a negacyclic-L NTT");
+        i += 1;
+    }
+};
+#[cfg(feature = "q32")]
 pub const NHOT: usize = 2;
-const INV_P0_MOD_P1: u64 = 1228140770;
-const INV_P0P1_MOD_P2: u64 = 407920109;
-#[allow(dead_code)]
-const M: u128 = 9283523221290398450993356801;
+#[cfg(feature = "q64")]
+pub const NHOT: usize = 3;
+#[cfg(feature = "q32")]
+pub const NGEN: usize = 3;
+#[cfg(feature = "q64")]
+pub const NGEN: usize = 5;
+
+const _: () = assert!(NHOT <= NGEN && NGEN <= PRIMES.len(), "not enough primes");
 
 struct Engine {
-    plans: [Plan; 3],
+    plans: [Plan; NPRIMES],
 }
 impl Engine {
     fn get() -> &'static Engine {
         static E: OnceLock<Engine> = OnceLock::new();
         E.get_or_init(|| Engine {
-            plans: [
-                Plan::try_new(L, PRIMES[0] as u32).expect("4096-NTT plan p0"),
-                Plan::try_new(L, PRIMES[1] as u32).expect("4096-NTT plan p1"),
-                Plan::try_new(L, PRIMES[2] as u32).expect("4096-NTT plan p2"),
-            ],
+            plans: std::array::from_fn(|i| {
+                Plan::try_new(L, PRIMES[i] as u32).expect("2N-NTT plan")
+            }),
         })
     }
 }
@@ -37,15 +54,17 @@ fn fwd_into(a: &[Fq], p: u64, plan: &Plan, buf: &mut [u32]) {
     plan.fwd(buf);
 }
 
-fn fwd_binary_into(a: &[Fq], plan: &Plan, buf: &mut [u32]) {
+fn fwd_small_into(a: &[Fq], plan: &Plan, buf: &mut [u32]) {
+    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digit must be < every RNS prime to skip the % p");
     buf.fill(0);
     for (i, &v) in a.iter().enumerate() {
-        debug_assert!(v.0 <= 1);
-        buf[i] = v.0;
+        debug_assert!((v.0 as u64) < GADGET_BASE);
+        buf[i] = v.0 as u32;
     }
     plan.fwd(buf);
 }
 
+#[cfg(feature = "q32")]
 macro_rules! with_prime {
     ($pi:expr, $p:ident, $body:block) => {
         match $pi {
@@ -57,10 +76,40 @@ macro_rules! with_prime {
                 const $p: u64 = PRIMES[1];
                 $body
             }
-            _ => {
+            2 => {
                 const $p: u64 = PRIMES[2];
                 $body
             }
+            other => unreachable!("with_prime!: only {} PRIMES, got index {}", NPRIMES, other),
+        }
+    };
+}
+
+#[cfg(feature = "q64")]
+macro_rules! with_prime {
+    ($pi:expr, $p:ident, $body:block) => {
+        match $pi {
+            0 => {
+                const $p: u64 = PRIMES[0];
+                $body
+            }
+            1 => {
+                const $p: u64 = PRIMES[1];
+                $body
+            }
+            2 => {
+                const $p: u64 = PRIMES[2];
+                $body
+            }
+            3 => {
+                const $p: u64 = PRIMES[3];
+                $body
+            }
+            4 => {
+                const $p: u64 = PRIMES[4];
+                $body
+            }
+            other => unreachable!("with_prime!: only {} PRIMES, got index {}", NPRIMES, other),
         }
     };
 }
@@ -76,28 +125,106 @@ fn shoup_mul_lazy(w: u32, w_pre: u32, x: u32, p: u64) -> u64 {
     (w as u64) * (x as u64) - q_hat * p
 }
 
+const NPRIMES: usize = PRIMES.len();
+
+const fn inv_mod(a: u64, m: u64) -> u64 {
+    let (mut t, mut newt): (i128, i128) = (0, 1);
+    let (mut r, mut newr): (i128, i128) = (m as i128, (a % m) as i128);
+    while newr != 0 {
+        let q = r / newr;
+        let tmp = t - q * newt;
+        t = newt;
+        newt = tmp;
+        let tmp = r - q * newr;
+        r = newr;
+        newr = tmp;
+    }
+    if t < 0 {
+        t += m as i128;
+    }
+    t as u64
+}
+
+const INV_P: [[u64; NPRIMES]; NPRIMES] = {
+    let mut out = [[0u64; NPRIMES]; NPRIMES];
+    let mut i = 0;
+    while i < NPRIMES {
+        let mut j = 0;
+        while j < i {
+            out[j][i] = inv_mod(PRIMES[j], PRIMES[i]);
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+};
+
+const M_MOD_Q: [u64; NPRIMES] = {
+    let mut out = [0u64; NPRIMES];
+    let mut acc: u64 = 1;
+    let mut i = 0;
+    while i < NPRIMES {
+        out[i] = acc;
+        acc = ((acc as u128 * PRIMES[i] as u128) % Q as u128) as u64;
+        i += 1;
+    }
+    out
+};
+
 #[inline(always)]
-fn crt2_modq(r0: u64, r1: u64) -> Fq {
-    let (p0, p1) = (PRIMES[0], PRIMES[1]);
-    debug_assert!(r0 < p0 && r1 < p1);
-    let t1 = ((r1 + p1 - r0) % p1) * INV_P0_MOD_P1 % p1;
-    Fq(reduce64(r0 + p0 * t1))
+fn crt_modq<const K: usize>(r: [u64; K]) -> Fq {
+    debug_assert!(K <= NPRIMES);
+    let mut t = [0u64; K];
+    t[0] = r[0];
+    let mut i = 1;
+    while i < K {
+        let pi = PRIMES[i];
+        debug_assert!(r[i] < pi);
+        let mut x = r[i];
+        let mut j = 0;
+        while j < i {
+            let tj = if t[j] >= pi { t[j] - pi } else { t[j] };
+            x = (x + pi - tj) % pi;
+            x = x * INV_P[j][i] % pi;
+            j += 1;
+        }
+        t[i] = x;
+        i += 1;
+    }
+    let mut acc = Fq(t[0] as _);
+    let mut i = 1;
+    while i < K {
+        acc = acc + Fq(t[i] as _) * Fq(M_MOD_Q[i] as _);
+        i += 1;
+    }
+    acc
+}
+
+const _: () = {
+    assert!(M_MOD_Q[0] == 1, "the 0-th mixed-radix weight must be 1");
+    let mut i = 0;
+    while i < NPRIMES {
+        assert!(PRIMES[i] < Q, "RNS primes must be < q (precondition for the reduction-free 0-th term)");
+        let mut j = 0;
+        while j < NPRIMES {
+            assert!(PRIMES[j] < 2 * PRIMES[i], "primes must be within a factor of 2 (precondition for a single conditional subtraction)");
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
+#[inline(always)]
+fn crt_hot_modq(r: [u64; NHOT]) -> Fq {
+    crt_modq::<NHOT>(r)
 }
 
 #[inline]
-fn crt3(r0: u64, r1: u64, r2: u64) -> u128 {
-    let (p0, p1, p2) = (PRIMES[0], PRIMES[1], PRIMES[2]);
-    let t1 = ((r1 + p1 - r0 % p1) % p1) * INV_P0_MOD_P1 % p1;
-    let x = r0 as u128 + p0 as u128 * t1 as u128;
-    let xp2 = (x % p2 as u128) as u64;
-    let t2 = ((r2 + p2 - xp2) % p2) * INV_P0P1_MOD_P2 % p2;
-    x + (p0 as u128 * p1 as u128) * t2 as u128
-}
-#[inline]
-fn crt3_modq(r0: u64, r1: u64, r2: u64) -> Fq {
-    Fq((crt3(r0, r1, r2) % Q as u128) as u32)
+fn crt_gen_modq(r: [u64; NGEN]) -> Fq {
+    crt_modq::<NGEN>(r)
 }
 
+#[derive(Clone)]
 pub struct Spectra {
     fwd: [Vec<u32>; NHOT],
     shoup: [Vec<u32>; NHOT],
@@ -120,8 +247,8 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
     let e = Engine::get();
     assert!(cols.len() <= specs.len());
     debug_assert!(
-        cols.iter().all(|c| c.c.iter().all(|v| v.0 <= 1)),
-        "熱路徑前提：右運算元的係數必須是 bit —— 2 質數的 RNS 界據此而定（見模組說明）"
+        cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
+        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE)         -- the RNS bound for NHOT primes depends on it"
     );
 
     let res: Vec<Vec<u32>> = (0..NHOT)
@@ -135,7 +262,7 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
                     .fold(
                         || (vec![0u64; L], vec![0u32; L]),
                         |(mut acc, mut cf), (d, col)| {
-                            fwd_binary_into(&col.c, plan, &mut cf);
+                            fwd_small_into(&col.c, plan, &mut cf);
                             let sf = &specs[d].fwd[pi];
                             let sh = &specs[d].shoup[pi];
                             for i in 0..L {
@@ -162,12 +289,12 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
         })
         .collect();
 
-    (0..2 * N - 1).map(|k| crt2_modq(res[0][k] as u64, res[1][k] as u64)).collect()
+    (0..2 * N - 1).map(|k| crt_hot_modq(std::array::from_fn(|i| res[i][k] as u64))).collect()
 }
 
 fn inner_full_general(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
     let e = Engine::get();
-    let res: Vec<Vec<u32>> = (0..3)
+    let res: Vec<Vec<u32>> = (0..NGEN)
         .into_par_iter()
         .map(|pi| {
             let p = PRIMES[pi];
@@ -185,7 +312,7 @@ fn inner_full_general(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
         })
         .collect();
     (0..a.len() + b.len() - 1)
-        .map(|k| crt3_modq(res[0][k] as u64, res[1][k] as u64, res[2][k] as u64))
+        .map(|k| crt_gen_modq(std::array::from_fn(|i| res[i][k] as u64)))
         .collect()
 }
 
@@ -221,13 +348,73 @@ pub fn full_inner_product(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
     inner_full_binary(specs, cols)
 }
 
-pub fn negacyclic_mul_1536(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
+pub fn neg_and_quotient_rows(
+    specs: &[Spectra],
+    rows: usize,
+    cols: &[RingElem],
+) -> Vec<(RingElem, Vec<Fq>)> {
+    let e = Engine::get();
+    let ml = cols.len();
+    assert_eq!(specs.len(), rows * ml, "specs must be rows x ml (row-major)");
+    debug_assert!(
+        cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
+        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE)"
+    );
+
+    let res: Vec<Vec<Vec<u32>>> = (0..NHOT)
+        .into_par_iter()
+        .map(|pi| {
+            let plan = &e.plans[pi];
+            with_prime!(pi, P, {
+                let cf: Vec<Vec<u32>> = cols
+                    .iter()
+                    .map(|col| {
+                        let mut buf = vec![0u32; L];
+                        fwd_small_into(&col.c, plan, &mut buf);
+                        buf
+                    })
+                    .collect();
+                (0..rows)
+                    .into_par_iter()
+                    .map(|r| {
+                        let mut acc = vec![0u64; L];
+                        for d in 0..ml {
+                            let s = &specs[r * ml + d];
+                            let (sf, sh) = (&s.fwd[pi], &s.shoup[pi]);
+                            let cfd = &cf[d];
+                            for i in 0..L {
+                                acc[i] += shoup_mul_lazy(sf[i], sh[i], cfd[i], P);
+                            }
+                        }
+                        let mut buf: Vec<u32> = acc.iter().map(|&x| (x % P) as u32).collect();
+                        plan.normalize(&mut buf);
+                        plan.inv(&mut buf);
+                        buf
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+
+    (0..rows)
+        .map(|r| {
+            let full: Vec<Fq> = (0..2 * N - 1)
+                .map(|k| crt_hot_modq(std::array::from_fn(|i| res[i][r][k] as u64)))
+                .collect();
+            let neg = fold_neg(&full);
+            let t: Vec<Fq> = full[N..].iter().map(|&v| -v).collect();
+            (RingElem { c: neg }, t)
+        })
+        .collect()
+}
+
+pub fn negacyclic_mul_n(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
     fold_neg(&inner_full_general(a, b))
 }
-pub fn cyclic_mul_1536(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
+pub fn cyclic_mul_n(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
     fold_cyc(&inner_full_general(a, b))
 }
-pub fn full_mul_1536(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
+pub fn full_mul_n(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
     inner_full_general(a, b)
 }
 
@@ -244,6 +431,7 @@ pub fn mul_polys(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ring::GADGET_LEN;
     use crate::transcript::SimpleRng;
 
     fn random_poly(rng: &mut SimpleRng, len: usize) -> Vec<Fq> {
@@ -269,7 +457,7 @@ mod tests {
             let p = PRIMES[pi];
             let check = |w: u64, x: u64| {
                 let r = shoup_mul_lazy(w as u32, shoup_pre(w as u32, p), x as u32, p);
-                assert!(r < 2 * p, "lazy 結果必須 < 2p（p{pi}, w={w}, x={x}）");
+                assert!(r < 2 * p, "lazy result must be < 2p (p{pi}, w={w}, x={x})");
                 assert_eq!(r % p, w * x % p, "p{pi}, w={w}, x={x}");
             };
             for (w, x) in [(0u64, 0u64), (0, p - 1), (p - 1, 0), (p - 1, p - 1), (1, p - 1)] {
@@ -282,7 +470,17 @@ mod tests {
     }
 
     #[test]
-    fn pad4096_paths_match_schoolbook() {
+    fn ntt_length_is_exactly_2n() {
+        assert_eq!(L, 2 * N);
+        assert!(L.is_power_of_two(), "L is not a power of two => tfhe-ntt Plan cannot be built");
+        for (i, &p) in PRIMES.iter().enumerate() {
+            assert_eq!((p - 1) % (2 * L as u64), 0, "p{i} = {p} does not support negacyclic-{L}");
+            assert!(Plan::try_new(L, p as u32).is_some(), "Plan({L}) for p{i} cannot be built");
+        }
+    }
+
+    #[test]
+    fn pad2n_paths_match_schoolbook() {
         let mut rng = SimpleRng::new(2);
         let a = random_poly(&mut rng, N);
         let b = random_poly(&mut rng, N);
@@ -295,9 +493,9 @@ mod tests {
             neg_ref[k] = lo - hi;
             cyc_ref[k] = lo + hi;
         }
-        assert_eq!(negacyclic_mul_1536(&a, &b), neg_ref);
-        assert_eq!(cyclic_mul_1536(&a, &b), cyc_ref);
-        assert_eq!(full_mul_1536(&a, &b), full);
+        assert_eq!(negacyclic_mul_n(&a, &b), neg_ref);
+        assert_eq!(cyclic_mul_n(&a, &b), cyc_ref);
+        assert_eq!(full_mul_n(&a, &b), full);
     }
 
     #[test]
@@ -321,24 +519,30 @@ mod tests {
 
     #[test]
     fn worst_case_binary_rns_bound_is_exact() {
-        use crate::ring::DELTA;
-        let ones = RingElem { c: vec![Fq::ONE; N] };
-        let maxv = vec![Fq(Q as u32 - 1); N];
-        let specs: Vec<Spectra> = (0..DELTA).map(|_| to_spectra(&maxv)).collect();
-        let cols: Vec<RingElem> = (0..DELTA).map(|_| ones.clone()).collect();
+        use crate::ring::DIGIT_BITS;
+        let dmax = (GADGET_BASE - 1) as u32;
+        let maxdig = RingElem { c: vec![Fq(dmax as _); N] };
+        let maxv = vec![Fq((Q - 1) as _); N];
+        let ml = crate::params::ELL * GADGET_LEN;
+        let specs: Vec<Spectra> = (0..ml).map(|_| to_spectra(&maxv)).collect();
+        let cols: Vec<RingElem> = (0..ml).map(|_| maxdig.clone()).collect();
 
         let got = full_inner_product(&specs, &cols);
         let qm1 = (Q - 1) as u128;
+        let dm = (GADGET_BASE - 1) as u128;
         let mut peak = 0u128;
         for k in 0..2 * N - 1 {
             let pairs = (k.min(N - 1) - k.saturating_sub(N - 1) + 1) as u128;
-            let exact = DELTA as u128 * qm1 * pairs;
+            let exact = ml as u128 * dm * qm1 * pairs;
             peak = peak.max(exact);
             assert_eq!(got[k].0 as u128, exact % Q as u128, "k = {k}");
         }
-        assert_eq!(peak, DELTA as u128 * qm1 * N as u128);
-        assert!(peak < PRIMES[0] as u128 * PRIMES[1] as u128, "2 質數的界不夠：{peak}");
-        assert!(peak >> 47 > 0 && peak >> 48 == 0, "上界應在 2^47.58 附近：{peak}");
+        assert_eq!(peak, ml as u128 * dm * qm1 * N as u128);
+        let modulus: u128 = (0..NHOT).map(|i| PRIMES[i] as u128).product();
+        assert!(peak < modulus, "bound for {NHOT} primes is too small: peak = {peak}, prod p = {modulus}");
+        let bits = 128 - peak.leading_zeros();
+        let doc_bits = if DIGIT_BITS == 1 { 48 } else { 87 };
+        assert_eq!(bits, doc_bits, "upper bound is not 2^{doc_bits}: 2^{bits}");
 
         let (neg, t) = neg_and_quotient(&specs, &cols);
         for i in 0..N {
@@ -359,7 +563,7 @@ mod tests {
             let spec = to_spectra(&a);
             let via_binary =
                 full_inner_product(std::slice::from_ref(&spec), &[RingElem { c: b.clone() }]);
-            assert_eq!(via_binary, full_mul_1536(&a, &b));
+            assert_eq!(via_binary, full_mul_n(&a, &b));
         }
     }
 
@@ -369,59 +573,39 @@ mod tests {
         use std::time::Instant;
         use tfhe_ntt::prime32::Plan;
         let p = PRIMES[0] as u32;
-        let plan4096 = Plan::try_new(4096, p).unwrap();
-        let plan1024 = Plan::try_new(1024, p).unwrap();
-        let plan2048 = Plan::try_new(2048, p).unwrap();
         let mut rng = SimpleRng::new(1);
         let src: Vec<u32> = (0..4096).map(|_| (rng.next_fq().0 as u64 % PRIMES[0]) as u32).collect();
         let iters = 3000;
-
-        let mut buf = src.clone();
-        let t = Instant::now();
-        for _ in 0..iters {
-            plan4096.fwd(&mut buf);
-            buf[0] = buf[0].wrapping_add(0);
-        }
-        let t4096 = t.elapsed();
-
-        let mut b1 = src[..1024].to_vec();
-        let mut b2 = src[1024..2048].to_vec();
-        let mut b3 = src[2048..3072].to_vec();
-        let t = Instant::now();
-        for _ in 0..iters {
-            plan1024.fwd(&mut b1);
-            plan1024.fwd(&mut b2);
-            plan1024.fwd(&mut b3);
-        }
-        let t3x1024 = t.elapsed();
-
-        let mut b = src[..2048].to_vec();
-        let t = Instant::now();
-        for _ in 0..iters {
-            plan2048.fwd(&mut b);
-        }
-        let t2048 = t.elapsed();
-
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / iters as f64;
-        println!("\n--- NTT forward 微基準（{iters} 次平均，單質數）---");
-        println!("  1 x 4096（現況）      {:8.3} us", per(t4096));
-        println!(
-            "  3 x 1024（radix-3）   {:8.3} us   ({:.0}% of 4096，尚未含重組層)",
-            per(t3x1024),
-            per(t3x1024) / per(t4096) * 100.0
-        );
-        println!("  1 x 2048（參考）      {:8.3} us", per(t2048));
+
+        println!("\n--- NTT forward microbenchmark (avg over {iters}, single prime; current L = {L}) ---");
+        for len in [512usize, 1024, 2048, 4096] {
+            let Some(plan) = Plan::try_new(len, p) else {
+                println!("  L = {len:<5}   (p = {p} does not support negacyclic-{len}, skipped)");
+                continue;
+            };
+            let mut buf = src[..len].to_vec();
+            let t = Instant::now();
+            for _ in 0..iters {
+                plan.fwd(&mut buf);
+            }
+            let d = t.elapsed();
+            println!("  L = {len:<5}{:8.3} us{}", per(d), if len == L { "   <- current" } else { "" });
+        }
     }
 
     #[test]
     #[ignore]
     fn ntt_innerfull_breakdown() {
-        use crate::ring::DELTA;
+
         use std::time::Instant;
         let mut rng = SimpleRng::new(9);
-        let a: Vec<Vec<Fq>> = (0..DELTA).map(|_| random_poly(&mut rng, N)).collect();
-        let cols: Vec<RingElem> =
-            (0..DELTA).map(|_| RingElem { c: random_bits(&mut rng, N) }).collect();
+        let a: Vec<Vec<Fq>> = (0..GADGET_LEN).map(|_| random_poly(&mut rng, N)).collect();
+        let cols: Vec<RingElem> = (0..GADGET_LEN)
+            .map(|_| RingElem {
+                c: (0..N).map(|_| Fq((rng.next_u64() % GADGET_BASE) as _)).collect(),
+            })
+            .collect();
 
         let t = Instant::now();
         let specs: Vec<Spectra> = a.iter().map(|p| to_spectra(p)).collect();
@@ -437,25 +621,25 @@ mod tests {
 
         let e = Engine::get();
         let mut buf = vec![0u32; L];
-        let nfwd = NHOT * (DELTA + 1);
+        let nfwd = NHOT * (GADGET_LEN + 1);
         let t = Instant::now();
         for _ in 0..nfwd {
             e.plans[0].fwd(&mut buf);
         }
         let t_ntt = t.elapsed().as_secs_f64() * 1e6;
 
-        println!("\n--- inner_full 拆解（delta={DELTA} column，右運算元是 bit，{NHOT} 質數）---");
+        println!("\n--- inner_full breakdown (delta={GADGET_LEN} columns, right operand is a bit, {NHOT} primes) ---");
         println!(
-            "  to_spectra x {DELTA}（含 {NHOT} 質數 + Shoup）  {:9.1} us  ({:.1} us / 個)",
+            "  to_spectra x {GADGET_LEN} (incl. {NHOT} primes + Shoup)  {:9.1} us  ({:.1} us each)",
             t_spec.as_secs_f64() * 1e6,
-            t_spec.as_secs_f64() * 1e6 / DELTA as f64
+            t_spec.as_secs_f64() * 1e6 / GADGET_LEN as f64
         );
         println!(
-            "  neg_and_quotient 一次呼叫（{} 執行緒）  {:9.1} us",
+            "  neg_and_quotient single call ({} threads)  {:9.1} us",
             rayon::current_num_threads(),
             t_call
         );
-        println!("  參考：{nfwd} 個 4096-NTT（單執行緒序列）  {:9.1} us", t_ntt);
-        println!("  逐點 MAC 規模: {NHOT} 質數 x {DELTA} col x {L} 點 = {} 次\n", NHOT * DELTA * L);
+        println!("  reference: {nfwd} {L}-NTTs (single-threaded, sequential)  {:9.1} us", t_ntt);
+        println!("  pointwise MAC scale: {NHOT} primes x {GADGET_LEN} cols x {L} points = {} ops\n", NHOT * GADGET_LEN * L);
     }
 }

@@ -1,9 +1,13 @@
-use crate::ext_field::Fq4;
+
+use crate::ext_field::FqExt;
 use crate::field::Fq;
 use crate::hash::HashWitness;
 use crate::params::HashParams;
 use crate::nizk1::{w_layout, BlindStatement, Nizk1Params, WLayout};
-use crate::ring::{gadget_recompose, gadget_scalar, poly_eval_pows, RingElem, BASE, DELTA, N};
+use crate::ring::{
+    bit_weight, gadget_recompose, poly_eval_pows, RingElem, DIGIT_BITS, GADGET_BASE, GADGET_LEN,
+    M_BIT_ROWS, N,
+};
 use rayon::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,13 +121,21 @@ pub fn num_quotients(params: &HashParams, nz: Option<&Nizk1Ctx>) -> usize {
     (params.num_groups() - 1) * params.ell + nz.map_or(0, |c| c.num_rows())
 }
 
-pub fn m_row(params: &HashParams, j: usize, i: usize, d: usize) -> usize {
+pub fn m_row(params: &HashParams, t: usize, i: usize, k: usize) -> usize {
     let steps = params.num_groups() - 1;
-    (j * steps + (i - 2)) * DELTA + d
+    (t * steps + (i - 2)) * M_BIT_ROWS + k
+}
+
+pub fn m_row_flat(params: &HashParams, i: usize, e: usize) -> usize {
+    m_row(params, e / M_BIT_ROWS, i, e % M_BIT_ROWS)
+}
+
+pub fn ml_bits(params: &HashParams) -> usize {
+    params.ell * M_BIT_ROWS
 }
 
 pub fn num_m_rows(params: &HashParams) -> usize {
-    params.ell * (params.num_groups() - 1) * DELTA
+    params.ell * (params.num_groups() - 1) * M_BIT_ROWS
 }
 
 pub fn check_witness(
@@ -137,36 +149,43 @@ pub fn check_witness(
         return false;
     }
 
-    let inner = |v: usize, col: &[RingElem]| -> RingElem {
+    let ml = params.ml();
+
+    let inner = |v: usize, r: usize, md: &[RingElem]| -> RingElem {
         let mut acc = RingElem::zero();
-        for d in 0..DELTA {
-            acc = &acc + &(&params.table[v][d] * &col[d]);
+        for d in 0..ml {
+            acc = &acc + &(params.a(v, r, d) * &md[d]);
         }
         acc
     };
+    let block = |md: &[RingElem], r: usize| -> RingElem {
+        gadget_recompose(&md[r * GADGET_LEN..(r + 1) * GADGET_LEN])
+    };
 
-    for j in 0..params.ell {
-        for i in 2..=ng {
-            for m in wit.column(j, i) {
-                for &c in &m.c {
-                    if c.0 as u64 >= BASE {
-                        return false;
-                    }
+    for i in 2..=ng {
+        let md = wit.column(i);
+        if md.len() != ml {
+            return false;
+        }
+        for m in md {
+            for &c in &m.c {
+                if c.0 as u64 >= GADGET_BASE {
+                    return false;
                 }
             }
         }
+    }
+
+    for r in 0..params.ell {
         for i in 2..ng {
-            let lhs = gadget_recompose(wit.column(j, i));
-            let rhs = inner(groups[i - 1], wit.column(j, i + 1));
-            if lhs != rhs {
+            if block(wit.column(i), r) != inner(groups[i - 1], r, wit.column(i + 1)) {
                 return false;
             }
         }
-        let lhs = gadget_recompose(wit.column(j, ng));
-        if lhs != params.table[groups[ng - 1]][j] {
+        if block(wit.column(ng), r) != *params.a(groups[ng - 1], r, 0) {
             return false;
         }
-        if inner(groups[0], wit.column(j, 2)) != ch[j] {
+        if inner(groups[0], r, wit.column(2)) != ch[r] {
             return false;
         }
     }
@@ -194,7 +213,7 @@ pub fn compute_quotients(
                 ts.push(t);
             }
             CKind::ComRand { which, idx } | CKind::ComMsg { which, idx } => {
-                let q = bq.expect("Phase B 的商未提供");
+                let q = bq.expect("Phase B quotients not provided");
                 let ck = if which == 0 { &nz.unwrap().nz.com_r } else { &nz.unwrap().nz.com_x };
                 let off = if matches!(meta.kind, CKind::ComRand { .. }) { 0 } else { ck.com_n() };
                 let src = if which == 0 { &q.cr } else { &q.dx };
@@ -211,20 +230,24 @@ pub struct LinRow {
     pub step_i: usize,
     pub kind: CKind,
     pub chain: usize,
-    pub m_entries: Vec<(usize, Fq4)>,
-    pub p_pub: Fq4,
+    pub m_entries: Vec<(usize, FqExt)>,
+    pub p_pub: FqExt,
 }
 
 pub struct Rows {
     pub lin: Vec<LinRow>,
-    pub a_hat: Vec<Vec<Fq4>>,
+    pub a_base: Vec<Vec<Vec<FqExt>>>,
+}
+
+pub fn bit_scale() -> Vec<Fq> {
+    (0..DIGIT_BITS).map(|b| Fq::new(1u64 << b)).collect()
 }
 
 impl Rows {
-    pub fn u_pub(&self, row: &LinRow, v: usize) -> Fq4 {
+    pub fn u_pub(&self, row: &LinRow, v: usize) -> FqExt {
         match row.kind {
-            CKind::Base => self.a_hat[v][row.chain],
-            _ => Fq4::ZERO,
+            CKind::Base => self.a_base[v][row.chain][0],
+            _ => FqExt::ZERO,
         }
     }
 }
@@ -232,31 +255,36 @@ impl Rows {
 pub fn build_rows(
     params: &HashParams,
     ch: &[RingElem],
-    alpha: Fq4,
+    alpha: FqExt,
     nz: Option<&Nizk1Ctx>,
 ) -> Rows {
     let ng = params.num_groups();
 
     let mut apw = Vec::with_capacity(N);
-    let mut p = Fq4::ONE;
+    let mut p = FqExt::ONE;
     for _ in 0..N {
         apw.push(p);
         p = p * alpha;
     }
-    let ch_hat: Vec<Fq4> = ch.iter().map(|a| poly_eval_pows(&a.c, &apw)).collect();
+    let ch_hat: Vec<FqExt> = ch.iter().map(|a| poly_eval_pows(&a.c, &apw)).collect();
 
-    let a_hat: Vec<Vec<Fq4>> = params
+    let ml = params.ml();
+    let a_base: Vec<Vec<Vec<FqExt>>> = params
         .table
         .par_iter()
-        .map(|row| row.iter().map(|e| poly_eval_pows(&e.c, &apw)).collect())
+        .map(|mat| {
+            mat.chunks(ml)
+                .map(|row| row.iter().map(|e| poly_eval_pows(&e.c, &apw)).collect())
+                .collect()
+        })
         .collect();
 
     let ev = |e: &RingElem| poly_eval_pows(&e.c, &apw);
-    let evv = |v: &[RingElem]| -> Vec<Fq4> { v.iter().map(ev).collect() };
+    let evv = |v: &[RingElem]| -> Vec<FqExt> { v.iter().map(ev).collect() };
     let (ar_hat, cr_hat, dx_hat, akey_hat) = match nz {
         Some(ctx) => {
-            let ar: Vec<Vec<Fq4>> = ctx.a_r.iter().map(|r| evv(r)).collect();
-            let keys: Vec<(Vec<Vec<Fq4>>, Vec<Vec<Fq4>>)> = [&ctx.nz.com_r, &ctx.nz.com_x]
+            let ar: Vec<Vec<FqExt>> = ctx.a_r.iter().map(|r| evv(r)).collect();
+            let keys: Vec<(Vec<Vec<FqExt>>, Vec<Vec<FqExt>>)> = [&ctx.nz.com_r, &ctx.nz.com_x]
                 .iter()
                 .map(|ck| {
                     (
@@ -274,16 +302,16 @@ pub fn build_rows(
     for meta in constraints(params, nz) {
         let j = meta.chain;
         let mut m_entries = Vec::new();
-        let mut p_pub = Fq4::ZERO;
+        let mut p_pub = FqExt::ZERO;
         match meta.kind {
             CKind::Recursion { i } => {
-                for d in 0..DELTA {
-                    m_entries.push((m_row(params, j, i, d), Fq4::from_fq(gadget_scalar(d))));
+                for k in 0..M_BIT_ROWS {
+                    m_entries.push((m_row(params, j, i, k), FqExt::from_fq(bit_weight(k))));
                 }
             }
             CKind::Base => {
-                for d in 0..DELTA {
-                    m_entries.push((m_row(params, j, ng, d), Fq4::from_fq(gadget_scalar(d))));
+                for k in 0..M_BIT_ROWS {
+                    m_entries.push((m_row(params, j, ng, k), FqExt::from_fq(bit_weight(k))));
                 }
             }
             CKind::Output => {
@@ -297,7 +325,7 @@ pub fn build_rows(
                 }
             }
             CKind::ComRand { which, idx } => {
-                let ctx = nz.expect("ComRand 需要 Phase B 參數");
+                let ctx = nz.expect("ComRand requires Phase B parameters");
                 let (a_hat_k, _) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 for (t, &coef) in a_hat_k[idx].iter().enumerate() {
@@ -307,10 +335,10 @@ pub fn build_rows(
                 p_pub = -if which == 0 { cr_hat[idx] } else { dx_hat[idx] };
             }
             CKind::ComMsg { which, idx } => {
-                let ctx = nz.expect("ComMsg 需要 Phase B 參數");
+                let ctx = nz.expect("ComMsg requires Phase B parameters");
                 let (_, b_hat_k) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
-                let two = Fq4::from_u64(2);
+                let two = FqExt::from_u64(2);
                 for (t, &coef) in b_hat_k[idx].iter().enumerate() {
                     m_entries.push((pos + t, two * coef));
                     m_entries.push((neg + t, -(two * coef)));
@@ -320,7 +348,7 @@ pub fn build_rows(
                 } else {
                     ctx.w.h_pack + idx
                 };
-                m_entries.push((msg_row, Fq4::ONE));
+                m_entries.push((msg_row, FqExt::ONE));
                 let ck_n = if which == 0 { ctx.nz.com_r.com_n() } else { ctx.nz.com_x.com_n() };
                 p_pub = -if which == 0 { cr_hat[ck_n + idx] } else { dx_hat[ck_n + idx] };
             }
@@ -334,7 +362,7 @@ pub fn build_rows(
             p_pub,
         });
     }
-    Rows { lin, a_hat }
+    Rows { lin, a_base }
 }
 
 #[cfg(test)]
@@ -353,6 +381,43 @@ mod tests {
     }
 
     #[test]
+    fn u_pub_is_the_gadget_column_not_the_bit_row() {
+        let (params, groups) = setup(16, 4, 3);
+        let (ch, _) = eval_h(&params, &groups);
+        let mut rng = SimpleRng::new(20260802);
+        let alpha = rng.next_fq4();
+        let rows = build_rows(&params, &ch, alpha, None);
+        let metas = constraints(&params, None);
+        let mut checked = 0usize;
+        for (row, meta) in rows.lin.iter().zip(&metas) {
+            if meta.kind != CKind::Base {
+                continue;
+            }
+            for v in 0..params.table_size() {
+                assert_eq!(
+                    rows.u_pub(row, v),
+                    params.a(v, row.chain, 0).eval(alpha),
+                    "u_pub picked the wrong cell: v={v} chain={}",
+                    row.chain
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no Base row was exercised");
+        for v in 0..params.table_size() {
+            for r in 0..params.ell {
+                for d in 0..params.ml() {
+                    assert_eq!(
+                        rows.a_base[v][r][d],
+                        params.a(v, r, d).eval(alpha),
+                        "a_base != A^(v)[r][d](alpha): v={v} r={r} d={d}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn honest_witness_passes_direct_check() {
         let (params, groups) = setup(8, 2, 2);
         let (ch, wit) = eval_h(&params, &groups);
@@ -363,8 +428,47 @@ mod tests {
     fn tampered_digit_fails_direct_check() {
         let (params, groups) = setup(8, 2, 1);
         let (ch, mut wit) = eval_h(&params, &groups);
-        wit.m[0][0][3].c[100] = wit.m[0][0][3].c[100] + Fq::ONE;
+        wit.m[0][3].c[100] = wit.m[0][3].c[100] + Fq::ONE;
         assert!(!check_witness(&params, &ch, &groups, &wit));
+    }
+
+    #[test]
+    fn check_witness_rejects_out_of_range_digit() {
+        let (params, groups) = setup(8, 2, 1);
+        let (ch, wit) = eval_h(&params, &groups);
+        assert!(check_witness(&params, &ch, &groups, &wit), "honest witness should pass");
+        let mut bad = eval_h(&params, &groups).1;
+        bad.m[0][2].c[7] = Fq::new(GADGET_BASE);
+        assert!(
+            !check_witness(&params, &ch, &groups, &bad),
+            "digit = GADGET_BASE ({GADGET_BASE}) is out of range and must be rejected"
+        );
+        if GADGET_BASE > 2 {
+            let big = (2..=params.num_groups())
+                .flat_map(|i| wit.column(i))
+                .flat_map(|m| m.c.iter())
+                .any(|c| c.0 as u64 >= 2);
+            assert!(big, "honest base-{GADGET_BASE} witness has no digit >= 2");
+        }
+    }
+
+    #[test]
+    fn gadget_represents_extreme_field_elements() {
+        use crate::ring::{gadget_decompose, gadget_recompose};
+        for v in [0u64, 1, 2, crate::field::Q - 1, crate::field::Q / 2, crate::field::Q - 2] {
+            let mut e = RingElem::zero();
+            for i in 0..N {
+                e.c[i] = Fq::new(v);
+            }
+            let digits = gadget_decompose(&e);
+            assert_eq!(digits.len(), GADGET_LEN);
+            for d in &digits {
+                for c in &d.c {
+                    assert!((c.0 as u64) < GADGET_BASE, "digit out of range: v = {v}");
+                }
+            }
+            assert_eq!(gadget_recompose(&digits), e, "v = {v} does not recompose to the original value");
+        }
     }
 
     #[test]
@@ -377,28 +481,35 @@ mod tests {
         let mut rng = SimpleRng::new(2718);
         let alpha = rng.next_fq4();
 
-        let mut w_hat = vec![Fq4::ZERO; num_m_rows(&params)];
-        for j in 0..params.ell {
-            for i in 2..=ng {
-                for d in 0..DELTA {
-                    w_hat[m_row(&params, j, i, d)] = wit.column(j, i)[d].eval(alpha);
+        let mut w_hat = vec![FqExt::ZERO; num_m_rows(&params)];
+        for i in 2..=ng {
+            for (d, digit) in wit.column(i).iter().enumerate() {
+                let (t, c) = (d / GADGET_LEN, d % GADGET_LEN);
+                for b in 0..DIGIT_BITS {
+                    let bits = crate::ring::RingElem {
+                        c: digit.c.iter().map(|v| Fq(((v.0 as u64 >> b) & 1) as _)).collect(),
+                    };
+                    w_hat[m_row(&params, t, i, c * DIGIT_BITS + b)] = bits.eval(alpha);
                 }
             }
         }
 
-        let xn1 = alpha.pow(N as u128) + Fq4::ONE;
+        let xn1 = alpha.pow(N as u128) + FqExt::ONE;
         let rows = build_rows(&params, &ch, alpha, None);
         let metas = constraints(&params, None);
         for (row, meta) in rows.lin.iter().zip(&metas) {
             let a1 = row.m_entries.iter().fold(row.p_pub, |acc, &(k, c)| acc + c * w_hat[k]);
             let v = groups[row.step_i - 1];
             let u = match u_src(row.kind) {
-                Some(src) => (0..DELTA).fold(Fq4::ZERO, |acc, d| {
-                    acc + rows.a_hat[v][d] * w_hat[m_row(&params, row.chain, src, d)]
+                Some(src) => (0..ml_bits(&params)).fold(FqExt::ZERO, |acc, e| {
+                    #[allow(clippy::modulo_one)]
+                    let b = e % DIGIT_BITS;
+                    let ah = Fq::new(1u64 << b) * rows.a_base[v][row.chain][e / DIGIT_BITS];
+                    acc + ah * w_hat[m_row_flat(&params, src, e)]
                 }),
                 None => rows.u_pub(row, v),
             };
-            let tc = meta.t_index.map(|idx| poly_eval(&quotients[idx], alpha)).unwrap_or(Fq4::ZERO);
+            let tc = meta.t_index.map(|idx| poly_eval(&quotients[idx], alpha)).unwrap_or(FqExt::ZERO);
             assert_eq!(a1, u + xn1 * tc, "row {:?}", row.kind);
         }
     }

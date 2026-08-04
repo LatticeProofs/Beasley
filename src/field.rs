@@ -1,3 +1,4 @@
+
 use std::ops::{Add, Mul, Neg, Sub};
 
 pub const Q: u64 = 4294967197;
@@ -5,6 +6,23 @@ pub const Q: u64 = 4294967197;
 pub const C: u64 = 99;
 
 pub const GENERATOR: u64 = 6;
+
+pub const FQ_BYTES: usize = ((64 - Q.leading_zeros()) as usize).div_ceil(8);
+
+const _: () = assert!(FQ_BYTES == 4, "q32 Fq must be 4 bytes");
+
+#[inline(always)]
+pub fn fq_le_bytes(x: Fq) -> [u8; FQ_BYTES] {
+    let mut out = [0u8; FQ_BYTES];
+    out.copy_from_slice(&(x.0 as u64).to_le_bytes()[..FQ_BYTES]);
+    out
+}
+
+#[inline(always)]
+pub fn fq_from_words(mut next_u32: impl FnMut() -> u32) -> u64 {
+    let lo = next_u32() as u64;
+    if FQ_BYTES > 4 { lo | ((next_u32() as u64) << 32) } else { lo }
+}
 
 #[inline(always)]
 pub fn reduce64(v: u64) -> u32 {

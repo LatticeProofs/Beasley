@@ -1,5 +1,6 @@
+
 use crate::bits::PackedBits;
-use crate::ext_field::Fq4;
+use crate::ext_field::{FqExt, LazyExtSum, EXT_DEG};
 use crate::field::Fq;
 use crate::hash::eval_h;
 use crate::mle::{eq_at_index, eq_eval, eq_table};
@@ -7,38 +8,47 @@ use crate::params::HashParams;
 use crate::pcs;
 use crate::nizk1::{blind_statement, BlindStatement, BlindWitness, Nizk1Params};
 use crate::relation::{
-    build_rows, check_witness, compute_quotients, constraints, g_pad, m_row, num_m_rows,
-    phase_a_cells, u_src, CKind, LinRow, Nizk1Ctx, Rows,
+    bit_scale, build_rows, check_witness, compute_quotients, constraints, g_pad, m_row,
+    m_row_flat, ml_bits,
+    num_m_rows, phase_a_cells, u_src, CKind, LinRow, Nizk1Ctx, Rows,
 };
-use crate::ring::{RingElem, DELTA, N};
+use crate::ring::{
+    RingElem, DIGIT_BITS, GADGET_BASE, GADGET_LEN, M_BIT_ROWS, N, W_RANGE_BASE,
+};
 use crate::sumcheck::{self, SumcheckProof};
 use crate::transcript::Transcript;
 use rayon::prelude::*;
 
-const COEF_VARS: usize = 11;
-const COEF_SLOTS: usize = 1 << COEF_VARS;
+pub const W_COEF_VARS: usize = N.trailing_zeros() as usize;
+pub const W_COEF_SLOTS: usize = 1 << W_COEF_VARS;
+
+pub const T_COEF_VARS: usize = W_COEF_VARS + 1;
+pub const T_COEF_SLOTS: usize = 1 << T_COEF_VARS;
+
+const _: () = assert!(W_COEF_SLOTS == N, "W must have exactly N slots");
+const _: () = assert!(T_COEF_SLOTS > N, "T needs a free region of >= N slots for the ZK mask");
 
 pub struct Proof {
     pub c_w: pcs::Commitment,
     pub c_h: pcs::Commitment,
     pub c_t: pcs::Commitment,
-    pub s1: Fq4,
-    pub u_final: Fq4,
-    pub q_claim: Fq4,
+    pub s1: FqExt,
+    pub u_final: FqExt,
+    pub q_claim: FqExt,
     pub sc1_bilinear: SumcheckProof,
     pub sc_quotient: SumcheckProof,
     pub sc_batched: SumcheckProof,
     pub sc4_bit: SumcheckProof,
     pub sc5_onehot: SumcheckProof,
-    pub open_w: Fq4,
-    pub open_t: Fq4,
-    pub open_h_sc1: Fq4,
-    pub open_h_bit: Fq4,
-    pub open_h_sum: Fq4,
-    pub mask_totals: [Fq4; 5],
-    pub mask_evals: [Fq4; 5],
-    pub open_h_eq: Option<Fq4>,
-    pub open_hpack: Option<Fq4>,
+    pub open_w: FqExt,
+    pub open_t: FqExt,
+    pub open_h_sc1: FqExt,
+    pub open_h_bit: FqExt,
+    pub open_h_sum: FqExt,
+    pub mask_totals: [FqExt; 5],
+    pub mask_evals: [FqExt; 5],
+    pub open_h_eq: Option<FqExt>,
+    pub open_hpack: Option<FqExt>,
 }
 
 pub fn proof_fingerprint(p: &Proof) -> u64 {
@@ -48,7 +58,7 @@ pub fn proof_fingerprint(p: &Proof) -> u64 {
         *d = d.wrapping_mul(0x100000001b3);
     }
     #[inline]
-    fn mix_fq4(d: &mut u64, v: Fq4) {
+    fn mix_fq4(d: &mut u64, v: FqExt) {
         for c in v.0 {
             mix(d, c.0 as u64);
         }
@@ -81,28 +91,33 @@ pub fn proof_fingerprint(p: &Proof) -> u64 {
     *d
 }
 
-fn bit_poly(z: Fq4) -> Fq4 {
-    z * (z - Fq4::ONE)
+fn bit_poly(z: FqExt) -> FqExt {
+    z * (z - FqExt::ONE)
 }
 
-fn challenge_vec(tr: &mut Transcript, n: usize) -> Vec<Fq4> {
+fn challenge_vec(tr: &mut Transcript, n: usize) -> Vec<FqExt> {
     (0..n).map(|_| tr.challenge_fq4()).collect()
 }
 
 fn mask_slot(d: &Dims, flat: usize) -> usize {
-    let free = COEF_SLOTS - N;
+    let free = T_COEF_SLOTS - N;
     let cell = flat / free;
-    debug_assert!(cell < d.c_cells, "遮罩係數放不下 t_full 的空閒區");
-    cell * COEF_SLOTS + N + (flat % free)
+    assert!(
+        cell < d.c_cells,
+        "ZK mask coefficients do not fit t_full's free region: need > {} cells, only {} available",
+        flat,
+        d.c_cells * free
+    );
+    cell * T_COEF_SLOTS + N + (flat % free)
 }
 
-fn mask_weights(d: &Dims, base: usize, w: &[Fq4]) -> Vec<(usize, Fq4)> {
-    let mut out = Vec::with_capacity(w.len() * 4);
+fn mask_weights(d: &Dims, base: usize, w: &[FqExt]) -> Vec<(usize, FqExt)> {
+    let mut out = Vec::with_capacity(w.len() * EXT_DEG);
     for (j, &wj) in w.iter().enumerate() {
-        for a in 0..4 {
-            let mut basis = Fq4::ZERO;
+        for a in 0..EXT_DEG {
+            let mut basis = FqExt::ZERO;
             basis.0[a] = Fq::ONE;
-            out.push((mask_slot(d, base + 4 * j + a), basis * wj));
+            out.push((mask_slot(d, base + EXT_DEG * j + a), basis * wj));
         }
     }
     out
@@ -118,34 +133,34 @@ fn mask_bases(d: &Dims) -> [usize; 5] {
     let mut acc = 0;
     for i in 0..5 {
         out[i] = acc;
-        acc += 4 * sh[i].0 * (sh[i].1 + 1);
+        acc += EXT_DEG * sh[i].0 * (sh[i].1 + 1);
     }
     out
 }
 
-fn alpha_tensor_eval(r_l: &[Fq4], alpha: Fq4, limit: usize) -> Fq4 {
+fn alpha_tensor_eval(r_l: &[FqExt], alpha: FqExt, limit: usize) -> FqExt {
     let nv = r_l.len();
     let mut pre = Vec::with_capacity(nv + 1);
-    pre.push(Fq4::ONE);
+    pre.push(FqExt::ONE);
     let mut ap = alpha;
     for j in 0..nv {
         let r = r_l[nv - 1 - j];
-        pre.push(pre[j] * (Fq4::ONE - r + r * ap));
+        pre.push(pre[j] * (FqExt::ONE - r + r * ap));
         ap = ap * ap;
     }
     if limit >= (1usize << nv) {
         return pre[nv];
     }
-    let mut acc = Fq4::ZERO;
-    let mut prefix_eq = Fq4::ONE;
+    let mut acc = FqExt::ZERO;
+    let mut prefix_eq = FqExt::ONE;
     for i in (0..nv).rev() {
         let r = r_l[nv - 1 - i];
         if (limit >> i) & 1 == 1 {
             let hi = (limit >> (i + 1)) << (i + 1);
-            acc = acc + prefix_eq * (Fq4::ONE - r) * alpha.pow(hi as u128) * pre[i];
+            acc = acc + prefix_eq * (FqExt::ONE - r) * alpha.pow(hi as u128) * pre[i];
             prefix_eq = prefix_eq * r;
         } else {
-            prefix_eq = prefix_eq * (Fq4::ONE - r);
+            prefix_eq = prefix_eq * (FqExt::ONE - r);
         }
     }
     acc
@@ -163,27 +178,44 @@ fn transcript_init(params: &HashParams, ch: &[RingElem]) -> Transcript {
     tr
 }
 
-fn contract_a_hat(rows: &Rows, r_v: &[Fq4]) -> Vec<Fq4> {
+fn contract_a_hat(rows: &Rows, r_v: &[FqExt]) -> Vec<Vec<FqExt>> {
     let eqv = eq_table(r_v);
-    let mut c_hat = vec![Fq4::ZERO; DELTA];
+    let (m, ml) = (rows.a_base[0].len(), rows.a_base[0][0].len());
+    let mut cb = vec![vec![FqExt::ZERO; ml]; m];
     for (v, &e) in eqv.iter().enumerate() {
-        for d in 0..DELTA {
-            c_hat[d] = c_hat[d] + e * rows.a_hat[v][d];
+        let av = &rows.a_base[v];
+        for r in 0..m {
+            let (dst, src) = (&mut cb[r], &av[r]);
+            for d in 0..ml {
+                dst[d] = dst[d] + e * src[d];
+            }
         }
     }
-    c_hat
+    let pow2 = bit_scale();
+    cb.iter()
+        .map(|row| {
+            (0..ml * DIGIT_BITS)
+                .map(|e| {
+                    #[allow(clippy::modulo_one)]
+                    let b = e % DIGIT_BITS;
+                    pow2[b] * row[e / DIGIT_BITS]
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn lg_mle_eval(
     params: &HashParams,
     rows: &Rows,
-    tau: &[Fq4],
-    r_c: &[Fq4],
-    c_hat: &[Fq4],
-    gamma: Fq4,
-    r_k: &[Fq4],
-) -> Fq4 {
-    let mut acc = Fq4::ZERO;
+    tau: &[FqExt],
+    r_c: &[FqExt],
+    c_hat: &[Vec<FqExt>],
+    gamma: FqExt,
+    r_k: &[FqExt],
+) -> FqExt {
+    let mlb = ml_bits(params);
+    let mut acc = FqExt::ZERO;
     for row in &rows.lin {
         let w_m = eq_at_index(tau, row.cell);
         for &(k, coef) in &row.m_entries {
@@ -191,29 +223,28 @@ fn lg_mle_eval(
         }
         if let Some(src) = u_src(row.kind) {
             let w_n = gamma * eq_at_index(r_c, row.cell);
-            for d in 0..DELTA {
-                acc = acc + w_n * c_hat[d] * eq_at_index(r_k, m_row(params, row.chain, src, d));
+            let cr = &c_hat[row.chain];
+            for e in 0..mlb {
+                acc = acc + w_n * cr[e] * eq_at_index(r_k, m_row_flat(params, src, e));
             }
         }
     }
     acc
 }
 
-fn ppub_sum(rows: &Rows, point: &[Fq4]) -> Fq4 {
-    rows.lin.iter().fold(Fq4::ZERO, |a, row| a + eq_at_index(point, row.cell) * row.p_pub)
+fn ppub_sum(rows: &Rows, point: &[FqExt]) -> FqExt {
+    rows.lin.iter().fold(FqExt::ZERO, |a, row| a + eq_at_index(point, row.cell) * row.p_pub)
 }
 
-fn pu_sum(rows: &Rows, r_c: &[Fq4], r_v: &[Fq4]) -> Fq4 {
+fn pu_sum(rows: &Rows, r_c: &[FqExt], r_v: &[FqExt]) -> FqExt {
     let eqv = eq_table(r_v);
-    let mut acc = Fq4::ZERO;
+    let mut acc = FqExt::ZERO;
     for row in &rows.lin {
         if row.kind != CKind::Base {
             continue;
         }
-        let inner = eqv
-            .iter()
-            .enumerate()
-            .fold(Fq4::ZERO, |a, (v, &e)| a + e * rows.a_hat[v][row.chain]);
+        let inner =
+            eqv.iter().enumerate().fold(FqExt::ZERO, |a, (v, &e)| a + e * rows.u_pub(row, v));
         acc = acc + eq_at_index(r_c, row.cell) * inner;
     }
     acc
@@ -237,7 +268,7 @@ struct Dims {
 
 impl Dims {
     fn nv_t(&self) -> usize {
-        (self.c_cells * COEF_SLOTS).trailing_zeros() as usize
+        (self.c_cells * T_COEF_SLOTS).trailing_zeros() as usize
     }
 }
 
@@ -261,7 +292,7 @@ fn dims(params: &HashParams, nz: Option<&Nizk1Ctx>) -> Dims {
         nv_i,
         nv_h: nv_i + gb,
         kw_pad,
-        nv_w: (kw_pad * COEF_SLOTS).trailing_zeros() as usize,
+        nv_w: (kw_pad * W_COEF_SLOTS).trailing_zeros() as usize,
         c_cells,
         u_cells: c_cells * tsz,
         h_cells: g_pad * tsz,
@@ -269,9 +300,20 @@ fn dims(params: &HashParams, nz: Option<&Nizk1Ctx>) -> Dims {
 }
 
 fn put_bits(zw: &mut PackedBits, k: usize, poly: &[Fq]) {
-    let base = k * COEF_SLOTS;
+    let acc = poly.iter().fold(0u64, |a, &v| a | v.0 as u64);
+    assert!(acc < W_RANGE_BASE, "W may only hold bits, got a row containing {acc} (missing base-2 decomposition of the digit? see q64.md §4b)");
+    let base = k * W_COEF_SLOTS;
     for (c, &v) in poly.iter().enumerate() {
-        zw.or_bit(base + c, v.0);
+        zw.or_bit(base + c, v.0 as u32);
+    }
+}
+
+fn put_digit_bit(zw: &mut PackedBits, k: usize, digit: &[Fq], b: usize) {
+    debug_assert!(b < DIGIT_BITS);
+    let base = k * W_COEF_SLOTS;
+    for (c, &v) in digit.iter().enumerate() {
+        debug_assert!((v.0 as u64) < GADGET_BASE, "digit out of range [0,B)");
+        zw.or_bit(base + c, (((v.0 as u64) >> b) & 1) as u32);
     }
 }
 
@@ -280,8 +322,8 @@ fn h_cell(d: &Dims, cell: usize, v: usize) -> usize {
     (cell % d.g_pad) * d.tsz + v
 }
 
-fn half_point(d: &Dims, r_i: &[Fq4]) -> Vec<Fq4> {
-    let half = Fq4::from_u64(2).inv();
+fn half_point(d: &Dims, r_i: &[FqExt]) -> Vec<FqExt> {
+    let half = FqExt::from_u64(2).inv();
     let g = d.tsz.trailing_zeros() as usize;
     r_i.iter().copied().chain(std::iter::repeat(half).take(g)).collect()
 }
@@ -343,7 +385,7 @@ pub(crate) enum Sabotage {
     WrongRho { idx: usize },
     WrongHpack { idx: usize },
     WrongCxBlinding,
-    HighSlot { coef: usize },
+    NonCanonicalDigit { chain: usize, coef: usize },
 }
 
 fn build_w_table(
@@ -355,11 +397,13 @@ fn build_w_table(
     zk_mask: &[RingElem],
 ) -> PackedBits {
     let ng = params.num_groups();
-    let mut zw = PackedBits::zeros(d.kw_pad * COEF_SLOTS);
-    for j in 0..params.ell {
-        for i in 2..=ng {
-            for dd in 0..DELTA {
-                put_bits(&mut zw, m_row(params, j, i, dd), &wit.column(j, i)[dd].c);
+    let mut zw = PackedBits::zeros(d.kw_pad * W_COEF_SLOTS);
+    for i in 2..=ng {
+        let md = wit.column(i);
+        for (dd, digit) in md.iter().enumerate() {
+            let (t, c) = (dd / GADGET_LEN, dd % GADGET_LEN);
+            for b in 0..DIGIT_BITS {
+                put_digit_bit(&mut zw, m_row(params, t, i, c * DIGIT_BITS + b), &digit.c, b);
             }
         }
     }
@@ -395,16 +439,28 @@ pub(crate) fn prove_impl(
     let mut tm = Timings::default();
     let mut clk = std::time::Instant::now();
 
-    let (ch, wit) = eval_h(params, groups);
+    let (mut ch, mut wit) = eval_h(params, groups);
     debug_assert!(check_witness(params, &ch, groups, &wit));
+    if let Sabotage::NonCanonicalDigit { chain, coef } = sab {
+        let ml = params.ml();
+        let blk = &mut wit.m[0][chain * GADGET_LEN..(chain + 1) * GADGET_LEN];
+        let v = blk.iter().rev().fold(0u128, |acc, e| (acc << DIGIT_BITS) | e.c[coef].0 as u128);
+        let alt = v + crate::field::Q as u128;
+        assert!(alt < 1u128 << M_BIT_ROWS, "coefficient {v} >= 2^{M_BIT_ROWS}-q, no alternative bit representation");
+        for (dg, e) in blk.iter_mut().enumerate() {
+            e.c[coef] = Fq(((alt >> (dg * DIGIT_BITS)) & (GADGET_BASE as u128 - 1)) as _);
+        }
+        let specs = params.spectra_for(groups[0]);
+        for r in 0..params.ell {
+            let (red, t) = crate::ntt::neg_and_quotient(&specs[r * ml..(r + 1) * ml], &wit.m[0]);
+            ch[r] = red;
+            wit.t[0][r] = t;
+        }
+    }
 
     let mut blind = nzin.map(|(nz, bw)| (nz, bw, blind_statement(params, nz, &ch, bw)));
     if let (Sabotage::WrongCxBlinding, Some((_, _, (st, _)))) = (sab, blind.as_mut()) {
         st.c_x[0].c[0] = st.c_x[0].c[0] + Fq::ONE;
-    }
-    if let (Sabotage::HighSlot { coef }, Some((nz, _, (st, _)))) = (sab, blind.as_mut()) {
-        let row = nz.com_x.com_n();
-        st.d_x[row].c[coef] = st.d_x[row].c[coef] - Fq::ONE;
     }
     let ctx_store = blind.as_ref().map(|(nz, _, (st, _))| Nizk1Ctx::new(params, nz, st));
     let nzctx = ctx_store.as_ref();
@@ -417,13 +473,6 @@ pub(crate) fn prove_impl(
     let mut quotients = compute_quotients(params, &wit, nzctx, bq);
     if let Sabotage::WrongQuotient { idx } = sab {
         quotients[idx][0] = quotients[idx][0] + Fq::ONE;
-    }
-    if let Sabotage::HighSlot { coef } = sab {
-        let ctx = nzctx.expect("Phase B");
-        let idx = params.ell * (params.num_groups() - 1)
-            + ctx.nz.com_r.out_len()
-            + ctx.nz.com_x.com_n();
-        quotients[idx][coef] = quotients[idx][coef] + Fq::ONE;
     }
 
     let zk_seed: [u8; 32] = match nzin {
@@ -450,23 +499,20 @@ pub(crate) fn prove_impl(
     let mut zw =
         build_w_table(params, &d, &wit, nzctx, blind.as_ref().map(|(_, bw, _)| *bw), &zk_mask);
     match sab {
-        Sabotage::FlipMBit { row, coef } => zw.flip(row * COEF_SLOTS + coef),
+        Sabotage::FlipMBit { row, coef } => zw.flip(row * W_COEF_SLOTS + coef),
         Sabotage::WrongRho { idx } => {
-            zw.flip((nzctx.expect("Phase B").w.rho_r_pos + idx) * COEF_SLOTS)
+            zw.flip((nzctx.expect("Phase B").w.rho_r_pos + idx) * W_COEF_SLOTS)
         }
         Sabotage::WrongHpack { idx } => {
-            zw.flip((nzctx.expect("Phase B").w.h_pack + idx) * COEF_SLOTS)
-        }
-        Sabotage::HighSlot { coef } => {
-            zw.set(nzctx.expect("Phase B").w.h_pack * COEF_SLOTS + N + coef)
+            zw.flip((nzctx.expect("Phase B").w.h_pack + idx) * W_COEF_SLOTS)
         }
         _ => {}
     }
 
-    let mut t_full = vec![Fq::ZERO; d.c_cells * COEF_SLOTS];
+    let mut t_full = vec![Fq::ZERO; d.c_cells * T_COEF_SLOTS];
     for meta in constraints(params, nzctx) {
         if let Some(idx) = meta.t_index {
-            let base = meta.cell * COEF_SLOTS;
+            let base = meta.cell * T_COEF_SLOTS;
             for (c, &v) in quotients[idx].iter().enumerate() {
                 t_full[base + c] = v;
             }
@@ -475,8 +521,8 @@ pub(crate) fn prove_impl(
 
     for (i, m) in maskers.iter().enumerate() {
         for (j, c) in m.coeffs_flat().enumerate() {
-            for a in 0..4 {
-                t_full[mask_slot(&d, bases[i] + 4 * j + a)] = c.0[a];
+            for a in 0..EXT_DEG {
+                t_full[mask_slot(&d, bases[i] + EXT_DEG * j + a)] = c.0[a];
             }
         }
     }
@@ -521,65 +567,66 @@ pub(crate) fn prove_impl(
 
     tm.mark("build_rows(a_hat)", &mut clk);
 
-    const _: () = assert!(N <= COEF_SLOTS, "環維度不能超過 slot 數");
-    let mut alpha_pows = Vec::with_capacity(COEF_SLOTS);
-    let mut p = Fq4::ONE;
-    for s in 0..COEF_SLOTS {
-        alpha_pows.push(if s < N { p } else { Fq4::ZERO });
+    let mut alpha_pows = Vec::with_capacity(T_COEF_SLOTS);
+    let mut p = FqExt::ONE;
+    for s in 0..T_COEF_SLOTS {
+        alpha_pows.push(if s < N { p } else { FqExt::ZERO });
         p = p * alpha;
     }
+    let alpha_pows_w = &alpha_pows[..W_COEF_SLOTS];
 
     let tau = challenge_vec(&mut tr, d.nv_c);
 
     let w_rows = nzctx.map_or(num_m_rows(params), |c| c.w.total);
-    let w_hat: Vec<Fq4> = (0..w_rows)
+    let w_hat: Vec<FqExt> = (0..w_rows)
         .into_par_iter()
         .map(|k| {
-            let base = k * COEF_SLOTS;
-            let mut acc = [0u64; 4];
-            for wi in 0..COEF_SLOTS / 64 {
+            let base = k * W_COEF_SLOTS;
+            let mut acc = LazyExtSum::new();
+            for wi in 0..W_COEF_SLOTS / 64 {
                 let mut word = zw.word(base / 64 + wi);
                 while word != 0 {
                     let b = word.trailing_zeros() as usize;
-                    let ap = &alpha_pows[wi * 64 + b].0;
-                    for j in 0..4 {
-                        acc[j] += ap[j].0 as u64;
-                    }
+                    acc.add(&alpha_pows_w[wi * 64 + b]);
                     word &= word - 1;
                 }
             }
-            Fq4([
-                Fq(crate::field::reduce64(acc[0])),
-                Fq(crate::field::reduce64(acc[1])),
-                Fq(crate::field::reduce64(acc[2])),
-                Fq(crate::field::reduce64(acc[3])),
-            ])
+            acc.finish()
         })
         .collect();
 
     tm.mark("w_hat", &mut clk);
 
     let eq_tau = eq_table(&tau);
-    let mut eq_ext = vec![Fq4::ZERO; d.u_cells];
-    let mut h_ext = vec![Fq4::ZERO; d.u_cells];
+    let mut eq_ext = vec![FqExt::ZERO; d.u_cells];
+    let mut h_ext = vec![FqExt::ZERO; d.u_cells];
     for cell in 0..d.c_cells {
         for v in 0..d.tsz {
             eq_ext[cell * d.tsz + v] = eq_tau[cell];
             h_ext[cell * d.tsz + v] =
-                if zh.get(h_cell(&d, cell, v)) { Fq4::ONE } else { Fq4::ZERO };
+                if zh.get(h_cell(&d, cell, v)) { FqExt::ONE } else { FqExt::ZERO };
         }
     }
-    let mut u_table = vec![Fq4::ZERO; d.u_cells];
+    let pow2 = bit_scale();
+    let mut u_table = vec![FqExt::ZERO; d.u_cells];
     for row in &rows.lin {
         let base = row.cell * d.tsz;
         match u_src(row.kind) {
             Some(src) => {
-                let ws: Vec<Fq4> =
-                    (0..DELTA).map(|dd| w_hat[m_row(params, row.chain, src, dd)]).collect();
+                let ws: Vec<FqExt> = (0..ml_bits(params))
+                    .map(|e| w_hat[m_row_flat(params, src, e)])
+                    .collect();
+                let wsum: Vec<FqExt> = ws
+                    .chunks(DIGIT_BITS)
+                    .map(|ch| {
+                        ch.iter().enumerate().fold(FqExt::ZERO, |a, (b, &w)| a + pow2[b] * w)
+                    })
+                    .collect();
                 for v in 0..d.tsz {
-                    let mut acc = Fq4::ZERO;
-                    for dd in 0..DELTA {
-                        acc = acc + rows.a_hat[v][dd] * ws[dd];
+                    let ab = &rows.a_base[v][row.chain];
+                    let mut acc = FqExt::ZERO;
+                    for (dd, &w) in wsum.iter().enumerate() {
+                        acc = acc + ab[dd] * w;
                     }
                     u_table[base + v] = acc;
                 }
@@ -596,7 +643,7 @@ pub(crate) fn prove_impl(
         .iter()
         .zip(&h_ext)
         .zip(&u_table)
-        .fold(Fq4::ZERO, |acc, ((&e, &h), &u)| acc + e * h * u);
+        .fold(FqExt::ZERO, |acc, ((&e, &h), &u)| acc + e * h * u);
     tr.absorb_fq4(s1);
 
     tm.mark("SC1 tables (U)", &mut clk);
@@ -617,17 +664,17 @@ pub(crate) fn prove_impl(
     tm.mark("SC1", &mut clk);
 
     let eq_tau_q = eq_table(&tau);
-    let mut wq = vec![Fq4::ZERO; t_full.len()];
+    let mut wq = vec![FqExt::ZERO; t_full.len()];
     for cell in 0..d.c_cells {
         let e = eq_tau_q[cell];
         for (s, &ap) in alpha_pows.iter().enumerate() {
-            wq[cell * COEF_SLOTS + s] = e * ap;
+            wq[cell * T_COEF_SLOTS + s] = e * ap;
         }
     }
     let q_claim = t_full
         .iter()
         .zip(&wq)
-        .fold(Fq4::ZERO, |a, (&t, &w)| a + w * Fq4::from_fq(t));
+        .fold(FqExt::ZERO, |a, (&t, &w)| a + w * FqExt::from_fq(t));
     tr.absorb_fq4(q_claim);
     let mt1 = maskers[1].total_plain();
     tr.absorb_fq4(mt1);
@@ -640,7 +687,7 @@ pub(crate) fn prove_impl(
     let gamma = tr.challenge_fq4();
     let (r_c_part, r_v) = r_u.split_at(d.nv_c);
     let c_hat = contract_a_hat(&rows, r_v);
-    let mut lg = vec![Fq4::ZERO; d.kw_pad];
+    let mut lg = vec![FqExt::ZERO; d.kw_pad];
     for row in &rows.lin {
         let w_m = eq_at_index(&tau, row.cell);
         for &(k, coef) in &row.m_entries {
@@ -648,16 +695,17 @@ pub(crate) fn prove_impl(
         }
         if let Some(src) = u_src(row.kind) {
             let w_n = gamma * eq_at_index(r_c_part, row.cell);
-            for dd in 0..DELTA {
-                let k = m_row(params, row.chain, src, dd);
-                lg[k] = lg[k] + w_n * c_hat[dd];
+            let cr = &c_hat[row.chain];
+            for (e, &c) in cr.iter().enumerate() {
+                let k = m_row_flat(params, src, e);
+                lg[k] = lg[k] + w_n * c;
             }
         }
     }
 
     tm.mark("lg build", &mut clk);
 
-    let mut scratch: Vec<Fq4> = Vec::new();
+    let mut scratch: Vec<FqExt> = Vec::new();
     let tau0 = challenge_vec(&mut tr, d.nv_w);
     let lambda = tr.challenge_fq4();
     let mt2 = maskers[2].total_plain();
@@ -665,7 +713,7 @@ pub(crate) fn prove_impl(
     let (sc_batched, _r_w, open_w) = sumcheck::prove_batched_w(
         &zw,
         lg,
-        &alpha_pows,
+        alpha_pows_w,
         &tau0,
         lambda,
         &mut scratch,
@@ -685,10 +733,10 @@ pub(crate) fn prove_impl(
 
     let tau3 = challenge_vec(&mut tr, d.nv_i);
     let eq_i = eq_table(&tau3);
-    let p_tbl: Vec<Fq4> = (0..d.g_pad)
+    let p_tbl: Vec<FqExt> = (0..d.g_pad)
         .map(|i0| {
             let cnt = (0..d.tsz).filter(|&v| zh.get(i0 * d.tsz + v)).count();
-            Fq4::from_u64(cnt as u64)
+            FqExt::from_u64(cnt as u64)
         })
         .collect();
     let mt4 = maskers[4].total_plain();
@@ -710,7 +758,7 @@ pub(crate) fn prove_impl(
     tm.mark("PhaseB h-link", &mut clk);
 
     let mask_totals = [mt0, mt1, mt2, mt3, mt4];
-    let mask_evals: [Fq4; 5] = std::array::from_fn(|i| maskers[i].eval());
+    let mask_evals: [FqExt; 5] = std::array::from_fn(|i| maskers[i].eval());
 
     let proof = Proof {
         c_w,
@@ -738,22 +786,22 @@ pub(crate) fn prove_impl(
     (ch, st, proof, tm)
 }
 
-fn hpack_open(zw: &PackedBits, d: &Dims, ctx: &Nizk1Ctx, r6: &[Fq4]) -> Fq4 {
+fn hpack_open(zw: &PackedBits, d: &Dims, ctx: &Nizk1Ctx, r6: &[FqExt]) -> FqExt {
     let hp = ctx.nz.hpack_len.next_power_of_two();
     let per = d.h_cells / hp;
-    let mut tbl = vec![Fq4::ZERO; d.h_cells];
+    let mut tbl = vec![FqExt::ZERO; d.h_cells];
     for r in 0..hp {
-        let base = (ctx.w.h_pack + r) * COEF_SLOTS;
+        let base = (ctx.w.h_pack + r) * W_COEF_SLOTS;
         for c in 0..per {
             if zw.get(base + c) {
-                tbl[r * per + c] = Fq4::ONE;
+                tbl[r * per + c] = FqExt::ONE;
             }
         }
     }
     crate::mle::mle_eval(&tbl, r6)
 }
 
-fn hpack_point(d: &Dims, ctx: &Nizk1Ctx, r6: &[Fq4]) -> Vec<Fq4> {
+fn hpack_point(d: &Dims, ctx: &Nizk1Ctx, r6: &[FqExt]) -> Vec<FqExt> {
     let nv_k = d.kw_pad.trailing_zeros() as usize;
     let hp = ctx.nz.hpack_len.next_power_of_two();
     let nv_hp = hp.trailing_zeros() as usize;
@@ -762,11 +810,11 @@ fn hpack_point(d: &Dims, ctx: &Nizk1Ctx, r6: &[Fq4]) -> Vec<Fq4> {
     let prefix = ctx.w.h_pack >> nv_hp;
     let mut pt = Vec::with_capacity(d.nv_w);
     for b in (0..nv_k - nv_hp).rev() {
-        pt.push(Fq4::from_u64(((prefix >> b) & 1) as u64));
+        pt.push(FqExt::from_u64(((prefix >> b) & 1) as u64));
     }
     pt.extend_from_slice(&r6[..nv_hp]);
-    for _ in 0..COEF_VARS - nv_per {
-        pt.push(Fq4::ZERO);
+    for _ in 0..W_COEF_VARS - nv_per {
+        pt.push(FqExt::ZERO);
     }
     pt.extend_from_slice(&r6[nv_hp..]);
     debug_assert_eq!(pt.len(), d.nv_w);
@@ -804,7 +852,7 @@ fn verify_impl(
     }
     let ng = params.num_groups();
     let d = dims(params, nzctx);
-    let nv_t = (d.c_cells * COEF_SLOTS).trailing_zeros() as usize;
+    let nv_t = (d.c_cells * T_COEF_SLOTS).trailing_zeros() as usize;
 
     if proof.c_w.num_vars != d.nv_w
         || proof.c_h.num_vars != d.nv_h
@@ -870,7 +918,7 @@ fn verify_impl(
     let ppub = ppub_sum(&rows, &tau);
     let pu_rc = pu_sum(&rows, r_c_part, r_v);
     let claim2 = (proof.s1 - ppub) + gamma * (proof.u_final - pu_rc);
-    let xn1 = alpha.pow(N as u128) + Fq4::ONE;
+    let xn1 = alpha.pow(N as u128) + FqExt::ONE;
     let claim2_m = claim2 + xn1 * proof.q_claim;
     let tau0 = challenge_vec(&mut tr, d.nv_w);
     let lambda = tr.challenge_fq4();
@@ -906,7 +954,7 @@ fn verify_impl(
     }
 
     let tau3 = challenge_vec(&mut tr, d.nv_i);
-    let claim5 = (0..ng).fold(Fq4::ZERO, |a, i0| a + eq_at_index(&tau3, i0));
+    let claim5 = (0..ng).fold(FqExt::ZERO, |a, i0| a + eq_at_index(&tau3, i0));
     tr.absorb_fq4(proof.mask_totals[4]);
     let Some((e5, r_5)) = sumcheck::verify(
         claim5 + rho * proof.mask_totals[4],
@@ -917,7 +965,7 @@ fn verify_impl(
     ) else {
         return false;
     };
-    let two_g = Fq4::from_u64(2).pow(d.tsz.trailing_zeros() as u128);
+    let two_g = FqExt::from_u64(2).pow(d.tsz.trailing_zeros() as u128);
     if e5 - rho * proof.mask_evals[4] != eq_eval(&tau3, &r_5) * two_g * proof.open_h_sum {
         return false;
     }
@@ -936,7 +984,7 @@ fn verify_impl(
         }
     }
 
-    let mask_points: [&[Fq4]; 5] = [&r_u, &r_q, &r_w, &r_2, &r_5];
+    let mask_points: [&[FqExt]; 5] = [&r_u, &r_q, &r_w, &r_2, &r_5];
     for i in 0..5 {
         let (nv, deg) = shapes[i];
         let wt = if i == 3 {
@@ -1013,7 +1061,27 @@ mod tests {
         let bad_v = (groups[0] + 1) % params.table_size();
         let (ch, _, proof, _) =
             prove_impl(&params, &groups, Sabotage::ExtraOneHot { step: 0, v: bad_v }, None);
-        assert!(!verify(&params, &ch, &proof), "非 1-hot 的 witness 竟然通過驗證");
+        assert!(!verify(&params, &ch, &proof), "non-1-hot witness unexpectedly verified");
+    }
+
+    #[test]
+    fn noncanonical_gadget_decomposition_gives_a_second_accepted_statement() {
+        let mut params = HashParams::sample(4242, 16, 8, 1);
+        let groups = vec![7usize, 200usize];
+        params.table[groups[1]][0].c[3] = Fq::new(5);
+        params.crs_digest =
+            crate::params::crs_digest(params.n_bits, params.group_bits, params.ell, &params.table);
+
+        let (ch, proof) = prove(&params, &groups);
+        assert!(verify(&params, &ch, &proof), "honest proof must verify");
+
+        let (ch2, _, proof2, _) =
+            prove_impl(&params, &groups, Sabotage::NonCanonicalDigit { chain: 0, coef: 3 }, None);
+        assert_ne!(ch, ch2, "non-canonical decomposition did not change c_H -- the test has no discriminating power");
+        assert!(
+            verify(&params, &ch2, &proof2),
+            "(if this starts failing, the canonical constraint has been added -- change this test to assert !verify)"
+        );
     }
 
     #[test]
@@ -1022,18 +1090,18 @@ mod tests {
             let (params, groups) = setup(8, 2, 1, 79 + step as u64);
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::ZeroOneHotRow { step }, None);
-            assert!(!verify(&params, &ch, &proof), "step {step} 整列歸零竟然通過");
+            assert!(!verify(&params, &ch, &proof), "step {step}: zeroing the whole row unexpectedly passed");
         }
     }
 
     #[test]
     fn cheat_flip_m_bit() {
-        for (row, coef) in [(0usize, 0usize), (5, 700), (DELTA, 1535)] {
+        for (row, coef) in [(0usize, 0usize), (5, 700), (M_BIT_ROWS, N - 1)] {
             let (params, groups) = setup(8, 2, 1, 83);
             assert!(row < num_m_rows(&params));
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::FlipMBit { row, coef }, None);
-            assert!(!verify(&params, &ch, &proof), "翻轉 W({row},{coef}) 竟然通過");
+            assert!(!verify(&params, &ch, &proof), "flipping W({row},{coef}) unexpectedly passed");
         }
     }
 
@@ -1044,7 +1112,7 @@ mod tests {
         for idx in [0usize, nq - 1] {
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::WrongQuotient { idx }, None);
-            assert!(!verify(&params, &ch, &proof), "商 {idx} 造假竟然通過");
+            assert!(!verify(&params, &ch, &proof), "forged quotient {idx} unexpectedly passed");
         }
     }
 
@@ -1053,7 +1121,7 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(301, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongRho { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "ρ 造假竟然通過");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged rho unexpectedly passed");
     }
 
     #[test]
@@ -1061,19 +1129,68 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(302, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongHpack { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "h_pack 造假竟然通過");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged h_pack unexpectedly passed");
     }
 
     #[test]
-    fn cheat_high_slot() {
-        for coef in [0usize, 3, 511] {
-            let (params, nz, groups, bw) = setup_nizk1(304 + coef as u64, 8, 2, 1);
-            let (_, st, proof, _) =
-                prove_impl(&params, &groups, Sabotage::HighSlot { coef }, Some((&nz, &bw)));
-            assert!(
-                !verify_nizk1(&params, &nz, &st.unwrap(), &proof),
-                "slot N+{coef} 的高位作弊竟然通過"
-            );
+    fn w_slots_exactly_fill_the_ring() {
+        assert_eq!(W_COEF_SLOTS, N, "a W row must have exactly N slots (otherwise the G10 attack surface returns)");
+        assert!(T_COEF_SLOTS > N);
+        let alpha = FqExt::from_u64(12345);
+        let mut ap = FqExt::ONE;
+        for s in 0..T_COEF_SLOTS {
+            let w = if s < N { ap } else { FqExt::ZERO };
+            if s >= N {
+                assert_eq!(w, FqExt::ZERO, "a high slot of T unexpectedly has a non-zero alpha weight");
+            }
+            ap = ap * alpha;
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "W may only hold bits")]
+    fn put_bits_rejects_non_bit() {
+        let mut zw = PackedBits::zeros(2 * W_COEF_SLOTS);
+        let mut poly = vec![Fq::ZERO; W_COEF_SLOTS];
+        poly[3] = Fq::new(2);
+        put_bits(&mut zw, 0, &poly);
+    }
+
+    #[test]
+    fn put_bits_accepts_and_writes_bits() {
+        let mut zw = PackedBits::zeros(2 * W_COEF_SLOTS);
+        let mut poly = vec![Fq::ZERO; W_COEF_SLOTS];
+        for i in (0..W_COEF_SLOTS).step_by(3) {
+            poly[i] = Fq::ONE;
+        }
+        put_bits(&mut zw, 1, &poly);
+        for i in 0..W_COEF_SLOTS {
+            assert_eq!(zw.get(W_COEF_SLOTS + i), i % 3 == 0, "slot {i}");
+            assert!(!zw.get(i), "row 0 must not be written (slot {i})");
+        }
+    }
+
+    #[test]
+    fn put_digit_bit_reproduces_the_binary_expansion() {
+        use crate::ring::gadget_decompose;
+        let mut rng = SimpleRng::new(4242);
+        let w = RingElem { c: (0..N).map(|_| rng.next_fq()).collect() };
+        let digits = gadget_decompose(&w);
+        let mut zw = PackedBits::zeros(M_BIT_ROWS * W_COEF_SLOTS);
+        for (dd, digit) in digits.iter().enumerate() {
+            for b in 0..DIGIT_BITS {
+                put_digit_bit(&mut zw, dd * DIGIT_BITS + b, &digit.c, b);
+            }
+        }
+        for c in 0..N {
+            let v = w.c[c].0 as u64;
+            for k in 0..M_BIT_ROWS {
+                assert_eq!(
+                    zw.get(k * W_COEF_SLOTS + c),
+                    (v >> k) & 1 == 1,
+                    "bit {k} of coefficient {c} is wrong (two-layer grouping disagrees with the base-2 expansion)"
+                );
+            }
         }
     }
 
@@ -1082,14 +1199,14 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(303, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongCxBlinding, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "(N1) 造假竟然通過");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged (N1) unexpectedly passed");
     }
 
     #[test]
     fn tampered_onehot_opening_is_rejected() {
         let (params, groups) = setup(8, 2, 1, 78);
         let (ch, _, mut proof, _) = prove_impl(&params, &groups, Sabotage::None, None);
-        proof.open_h_sum = proof.open_h_sum + Fq4::ONE;
+        proof.open_h_sum = proof.open_h_sum + FqExt::ONE;
         assert!(!verify(&params, &ch, &proof));
     }
 
@@ -1106,7 +1223,7 @@ mod tests {
             Sabotage::WrongQuotient { idx: crate::relation::num_quotients(&params, None) - 1 },
         ] {
             let (ch, _, proof, _) = prove_impl(&params, &groups, sab, None);
-            assert!(!verify(&params, &ch, &proof), "ℓ=2 下 {sab:?} 竟然通過");
+            assert!(!verify(&params, &ch, &proof), "{sab:?} unexpectedly passed at ell=2");
         }
     }
 
@@ -1114,7 +1231,7 @@ mod tests {
     fn tampered_quotient_opening_is_rejected() {
         let (params, groups) = setup(8, 2, 1, 631);
         let (ch, _, mut proof, _) = prove_impl(&params, &groups, Sabotage::None, None);
-        proof.open_t = proof.open_t + Fq4::ONE;
+        proof.open_t = proof.open_t + FqExt::ONE;
         assert!(!verify(&params, &ch, &proof));
     }
 
@@ -1129,18 +1246,18 @@ mod tests {
             for (i0, &v) in groups.iter().enumerate() {
                 zh.set(i0 * d.tsz + v);
             }
-            let p_tbl: Vec<Fq4> = (0..d.g_pad)
+            let p_tbl: Vec<FqExt> = (0..d.g_pad)
                 .map(|i0| {
-                    Fq4::from_u64((0..d.tsz).filter(|&v| zh.get(i0 * d.tsz + v)).count() as u64)
+                    FqExt::from_u64((0..d.tsz).filter(|&v| zh.get(i0 * d.tsz + v)).count() as u64)
                 })
                 .collect();
             for (i0, &p) in p_tbl.iter().enumerate() {
-                assert_eq!(p, Fq4::from_u64((i0 < params.num_groups()) as u64));
+                assert_eq!(p, FqExt::from_u64((i0 < params.num_groups()) as u64));
             }
-            let two_g = Fq4::from_u64(2).pow(g as u128);
+            let two_g = FqExt::from_u64(2).pow(g as u128);
             let mut rng = SimpleRng::new(seed ^ 0xFACE);
             for _ in 0..4 {
-                let r_i: Vec<Fq4> = (0..d.nv_i).map(|_| rng.next_fq4()).collect();
+                let r_i: Vec<FqExt> = (0..d.nv_i).map(|_| rng.next_fq4()).collect();
                 assert_eq!(
                     two_g * pcs::open(&zh, &half_point(&d, &r_i)),
                     crate::mle::mle_eval(&p_tbl, &r_i),
@@ -1160,7 +1277,7 @@ mod tests {
             assert_eq!(proof.c_h.num_vars, proof.sc4_bit.rounds.len(), "c_h ↔ r_2");
             assert_eq!(proof.c_h.num_vars, proof.sc5_onehot.rounds.len() + g, "c_h ↔ r_5‖½");
             assert_eq!(proof.c_t.num_vars, proof.sc_quotient.rounds.len(), "c_t ↔ r_q");
-            assert_eq!(proof.c_t.num_vars, (d.c_cells * COEF_SLOTS).trailing_zeros() as usize);
+            assert_eq!(proof.c_t.num_vars, (d.c_cells * T_COEF_SLOTS).trailing_zeros() as usize);
         }
     }
 
@@ -1174,7 +1291,7 @@ mod tests {
                 1 => proof.c_h.num_vars -= 1,
                 _ => proof.c_t.num_vars += 1,
             }
-            assert!(!verify(&params, &ch, &proof), "承諾 {which} 的 arity 不符竟然通過");
+            assert!(!verify(&params, &ch, &proof), "commitment {which} with mismatched arity unexpectedly passed");
         }
     }
 
@@ -1190,7 +1307,7 @@ mod tests {
             let rows = build_rows(&params, &ch, alpha, None);
             let d = dims(&params, None);
             let nv_k = d.kw_pad.trailing_zeros() as usize;
-            let rv = |rng: &mut SimpleRng, k: usize| -> Vec<Fq4> {
+            let rv = |rng: &mut SimpleRng, k: usize| -> Vec<FqExt> {
                 (0..k).map(|_| rng.next_fq4()).collect()
             };
             let tau = rv(&mut rng, d.nv_c);
@@ -1202,8 +1319,8 @@ mod tests {
             let c_hat = contract_a_hat(&rows, &r_v);
             let fast = lg_mle_eval(&params, &rows, &tau, &r_c, &c_hat, gamma, &r_k);
 
-            let r_u: Vec<Fq4> = r_c.iter().chain(&r_v).copied().collect();
-            let mut naive = Fq4::ZERO;
+            let r_u: Vec<FqExt> = r_c.iter().chain(&r_v).copied().collect();
+            let mut naive = FqExt::ZERO;
             for row in &rows.lin {
                 let w_m = eq_at_index(&tau, row.cell);
                 for &(k, coef) in &row.m_entries {
@@ -1212,10 +1329,13 @@ mod tests {
                 if let Some(src) = u_src(row.kind) {
                     for v in 0..d.tsz {
                         let e = gamma * eq_at_index(&r_u, row.cell * d.tsz + v);
-                        for dd in 0..DELTA {
+                        let pw = bit_scale();
+                        for dd in 0..ml_bits(&params) {
+                            #[allow(clippy::modulo_one)]
+                            let b = dd % DIGIT_BITS;
+                            let ah = pw[b] * rows.a_base[v][row.chain][dd / DIGIT_BITS];
                             naive = naive
-                                + e * rows.a_hat[v][dd]
-                                    * eq_at_index(&r_k, m_row(&params, row.chain, src, dd));
+                                + e * ah * eq_at_index(&r_k, m_row_flat(&params, src, dd));
                         }
                     }
                 }
@@ -1231,16 +1351,16 @@ mod tests {
             let alpha = rng.next_fq4();
             let size = 1usize << nv;
             let mut pows = Vec::with_capacity(size);
-            let mut p = Fq4::ONE;
+            let mut p = FqExt::ONE;
             for _ in 0..size {
                 pows.push(p);
                 p = p * alpha;
             }
             for limit in [0, 1, 3.min(size), size / 2, size * 3 / 4, size - 1, size] {
-                let tbl: Vec<Fq4> =
-                    (0..size).map(|s| if s < limit { pows[s] } else { Fq4::ZERO }).collect();
+                let tbl: Vec<FqExt> =
+                    (0..size).map(|s| if s < limit { pows[s] } else { FqExt::ZERO }).collect();
                 for _ in 0..3 {
-                    let r: Vec<Fq4> = (0..nv).map(|_| rng.next_fq4()).collect();
+                    let r: Vec<FqExt> = (0..nv).map(|_| rng.next_fq4()).collect();
                     assert_eq!(
                         alpha_tensor_eval(&r, alpha, limit),
                         crate::mle::mle_eval(&tbl, &r),
@@ -1267,15 +1387,13 @@ mod tests {
         let zw = build_w_table(&params, &d, &wit, Some(&ctx), Some(&bw), &zk);
 
         for row in 0..crate::nizk1::ZK_MASK_ROWS {
-            let base = (ctx.w.mask + row) * COEF_SLOTS;
+            let base = (ctx.w.mask + row) * W_COEF_SLOTS;
             let ones = (0..N).filter(|&c| zw.get(base + c)).count();
             assert!(
                 ones > N * 40 / 100 && ones < N * 60 / 100,
-                "遮罩行 {row} 不像隨機 bit：{ones}/{N}（0 代表根本沒寫進去）"
+                "mask row {row} does not look like random bits: {ones}/{N} (0 means it was never written)"
             );
-            for c in N..COEF_SLOTS {
-                assert!(!zw.get(base + c), "遮罩行不該碰 slot >= N");
-            }
+            assert_eq!(W_COEF_SLOTS, N);
         }
     }
 
@@ -1297,11 +1415,11 @@ mod tests {
 
         let mut rng = SimpleRng::new(0x5A5A);
         for _ in 0..4 {
-            let r: Vec<Fq4> = (0..d.nv_w).map(|_| rng.next_fq4()).collect();
+            let r: Vec<FqExt> = (0..d.nv_w).map(|_| rng.next_fq4()).collect();
             assert_ne!(
                 pcs::open(&zw1, &r),
                 pcs::open(&zw2, &r),
-                "遮罩行沒有影響 W̃(r) —— 第 (ii) 層沒生效"
+                "the mask rows did not affect W~(r) -- layer (ii) is not in effect"
             );
         }
     }
@@ -1317,12 +1435,12 @@ mod tests {
             let rows = build_rows(&params, &st.c_x, rng.next_fq4(), Some(&ctx));
             let lo = ctx.w.mask;
             let hi = ctx.w.total;
-            assert!(hi > lo, "遮罩段長度為 0");
+            assert!(hi > lo, "mask segment has length 0");
             for row in &rows.lin {
                 for &(k, _) in &row.m_entries {
                     assert!(
                         !(lo..hi).contains(&k),
-                        "約束 {:?} 指到了遮罩行 {k}（會破壞 soundness）",
+                        "constraint {:?} points at mask row {k} (would break soundness)",
                         row.kind
                     );
                 }
@@ -1351,17 +1469,17 @@ mod tests {
             let mut ms: Vec<sumcheck::Masker> =
                 shapes.iter().map(|&(nv, deg)| sumcheck::Masker::new(&mut rng, nv, deg)).collect();
 
-            let mut t = vec![Fq::ZERO; d.c_cells * COEF_SLOTS];
+            let mut t = vec![Fq::ZERO; d.c_cells * T_COEF_SLOTS];
             for (i, m) in ms.iter().enumerate() {
                 for (j, c) in m.coeffs_flat().enumerate() {
-                    for a in 0..4 {
-                        t[mask_slot(&d, bases[i] + 4 * j + a)] = c.0[a];
+                    for a in 0..EXT_DEG {
+                        t[mask_slot(&d, bases[i] + EXT_DEG * j + a)] = c.0[a];
                     }
                 }
             }
             for cell in 0..d.c_cells {
                 for slot in 0..N {
-                    assert_eq!(t[cell * COEF_SLOTS + slot], Fq::ZERO, "遮罩撞進商的區域");
+                    assert_eq!(t[cell * T_COEF_SLOTS + slot], Fq::ZERO, "mask collides with the quotient region");
                 }
             }
 
@@ -1369,7 +1487,7 @@ mod tests {
             for i in 0..5 {
                 let (nv, deg) = shapes[i];
                 let (wt, expect) = if i == 3 {
-                    let tau: Vec<Fq4> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
+                    let tau: Vec<FqExt> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
                     (
                         sumcheck::Masker::weights_total_eq(nv, deg, &tau),
                         ms[i].total_eq(&tau),
@@ -1380,9 +1498,9 @@ mod tests {
                 assert_eq!(
                     pcs::open_linear(&t, &mask_weights(&d, bases[i], &wt)),
                     expect,
-                    "mask {i} 的總和取不回來 (n={n} g={g} ell={ell})"
+                    "cannot recover the sum of mask {i} (n={n} g={g} ell={ell})"
                 );
-                let r: Vec<Fq4> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
+                let r: Vec<FqExt> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
                 for (j, &rj) in r.iter().enumerate() {
                     ms[i].fold(j, rj);
                 }
@@ -1392,7 +1510,7 @@ mod tests {
                         &mask_weights(&d, bases[i], &sumcheck::Masker::weights_eval(nv, deg, &r))
                     ),
                     ms[i].eval(),
-                    "mask {i} 的 g(r) 取不回來"
+                    "cannot recover g(r) of mask {i}"
                 );
             }
         }
@@ -1400,7 +1518,8 @@ mod tests {
 
     #[test]
     fn hpack_open_matches_full_pcs_open() {
-        for &(n, g, ell, seed) in &[(8usize, 2usize, 1usize, 401u64), (8, 4, 2, 402), (16, 8, 1, 403)]
+        for &(n, g, ell, seed) in
+            &[(8usize, 2usize, 1usize, 401u64), (8, 4, 2, 402), (16, 8, 1, 403), (128, 8, 3, 404)]
         {
             let (params, nz, groups, bw) = setup_nizk1(seed, n, g, ell);
             let (ch, wit) = eval_h(&params, &groups);
@@ -1411,7 +1530,7 @@ mod tests {
             let zw = build_w_table(&params, &d, &wit, Some(&ctx), Some(&bw), &zk);
             let mut rng = SimpleRng::new(seed ^ 0xBEEF);
             for _ in 0..4 {
-                let r6: Vec<Fq4> = (0..d.nv_h).map(|_| rng.next_fq4()).collect();
+                let r6: Vec<FqExt> = (0..d.nv_h).map(|_| rng.next_fq4()).collect();
                 assert_eq!(
                     hpack_open(&zw, &d, &ctx, &r6),
                     pcs::open(&zw, &hpack_point(&d, &ctx, &r6)),

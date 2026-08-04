@@ -1,4 +1,5 @@
-use crate::ext_field::Fq4;
+
+use crate::ext_field::FqExt;
 use crate::field::{Fq, Q};
 use crate::keccak::Shake128;
 
@@ -39,15 +40,15 @@ impl CsRng {
     #[inline]
     pub fn next_fq(&mut self) -> Fq {
         loop {
-            let v = self.next_u32();
-            if (v as u64) < Q {
-                return Fq(v);
+            let v = crate::field::fq_from_words(|| self.next_u32());
+            if v < Q {
+                return Fq(v as _);
             }
         }
     }
 
-    pub fn next_fq4(&mut self) -> Fq4 {
-        Fq4([self.next_fq(), self.next_fq(), self.next_fq(), self.next_fq()])
+    pub fn next_fq4(&mut self) -> FqExt {
+        FqExt::from_fn(|_| self.next_fq())
     }
 
     #[inline]
@@ -87,9 +88,9 @@ mod tests {
             let mut r = CsRng::from_parts(d, &[s]);
             (0..8).map(|_| r.next_u64()).collect::<Vec<_>>()
         };
-        assert_eq!(seq("a", &s), seq("a", &s), "同種子必須決定性");
-        assert_ne!(seq("a", &s), seq("b", &s), "domain 不同 ⇒ 序列不同");
-        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "種子不同 ⇒ 序列不同");
+        assert_eq!(seq("a", &s), seq("a", &s), "the same seed must be deterministic");
+        assert_ne!(seq("a", &s), seq("b", &s), "different domain => different sequence");
+        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seed => different sequence");
     }
 
     #[test]
@@ -114,7 +115,7 @@ mod tests {
                 hi += 1;
             }
         }
-        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "分布傾斜：上半 {hi}/{N}");
+        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "distribution skewed: upper half {hi}/{N}");
     }
 
     #[test]
@@ -122,7 +123,7 @@ mod tests {
         let mut r = CsRng::from_parts("b", &[&insecure_test_secret(9)]);
         const N: usize = 64 * 1000;
         let ones = (0..N).filter(|_| r.next_bool()).count();
-        assert!(ones > N * 48 / 100 && ones < N * 52 / 100, "bit 不平衡：{ones}/{N}");
+        assert!(ones > N * 48 / 100 && ones < N * 52 / 100, "bit imbalance: {ones}/{N}");
 
         let mut r = CsRng::from_parts("b2", &[&insecure_test_secret(10)]);
         let mut per_pos = [0usize; 64];
@@ -134,7 +135,7 @@ mod tests {
             }
         }
         for (p, &c) in per_pos.iter().enumerate() {
-            assert!(c > 800 && c < 1200, "buffer 位置 {p} 傾斜：{c}/2000");
+            assert!(c > 800 && c < 1200, "buffer position {p} skewed: {c}/2000");
         }
     }
 

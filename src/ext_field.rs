@@ -1,7 +1,12 @@
+
 use crate::field::{reduce64, Fq, C, Q};
 use std::ops::{Add, Mul, Neg, Sub};
 
 pub const W: u64 = 2;
+
+pub const EXT_DEG: usize = 4;
+
+pub type FqExt = Fq4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Fq4(pub [Fq; 4]);
@@ -9,6 +14,21 @@ pub struct Fq4(pub [Fq; 4]);
 impl Fq4 {
     pub const ZERO: Fq4 = Fq4([Fq(0); 4]);
     pub const ONE: Fq4 = Fq4([Fq(1), Fq(0), Fq(0), Fq(0)]);
+
+    #[inline(always)]
+    pub const fn from_coeffs(c: [Fq; EXT_DEG]) -> Self {
+        Fq4(c)
+    }
+
+    #[inline(always)]
+    pub fn from_fn(f: impl FnMut(usize) -> Fq) -> Self {
+        Fq4(core::array::from_fn(f))
+    }
+
+    #[inline(always)]
+    pub fn coeffs(&self) -> &[Fq; EXT_DEG] {
+        &self.0
+    }
 
     pub fn from_fq(x: Fq) -> Self {
         Fq4([x, Fq::ZERO, Fq::ZERO, Fq::ZERO])
@@ -86,6 +106,44 @@ impl Mul for Fq4 {
         let c2 = reduce64(m(0, 2) + m(1, 1) + m(2, 0) + 2 * m(3, 3));
         let c3 = reduce64(m(0, 3) + m(1, 2) + m(2, 1) + m(3, 0));
         Fq4([Fq(c0), Fq(c1), Fq(c2), Fq(c3)])
+    }
+}
+
+pub fn poly_eval_pows(coeffs: &[Fq], alpha_pows: &[Fq4]) -> Fq4 {
+    let mut acc = [0u64; EXT_DEG];
+    for (&c, ap) in coeffs.iter().zip(alpha_pows) {
+        let cv = c.0 as u64;
+        for k in 0..EXT_DEG {
+            let p = cv * ap.0[k].0 as u64;
+            acc[k] += (p & 0xFFFF_FFFF) + C * (p >> 32);
+        }
+    }
+    Fq4(core::array::from_fn(|k| Fq(reduce64(acc[k]))))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LazyExtSum([u64; EXT_DEG]);
+
+impl Default for LazyExtSum {
+    fn default() -> Self {
+        LazyExtSum([0; EXT_DEG])
+    }
+}
+
+impl LazyExtSum {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    #[inline(always)]
+    pub fn add(&mut self, x: &Fq4) {
+        for k in 0..EXT_DEG {
+            self.0[k] += x.0[k].0 as u64;
+        }
+    }
+    #[inline(always)]
+    pub fn finish(self) -> Fq4 {
+        Fq4(core::array::from_fn(|k| Fq(reduce64(self.0[k]))))
     }
 }
 

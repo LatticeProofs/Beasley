@@ -1,3 +1,4 @@
+
 use std::time::Instant;
 use voprf::hash::bits_to_groups;
 use voprf::params::HashParams;
@@ -12,7 +13,11 @@ fn main() {
 
     let t0 = Instant::now();
     let params = HashParams::sample(20260713, n_bits, group_bits, ell);
-    println!("CRS precompute ({} rows): {:?}", params.table_size(), t0.elapsed());
+    println!(
+        "CRS precompute ({} tables): {:?}",
+        params.table_size(),
+        t0.elapsed()
+    );
 
     let mut rng = SimpleRng::new(42);
     let bits: Vec<bool> = (0..n_bits).map(|_| rng.next_bool()).collect();
@@ -21,6 +26,12 @@ fn main() {
     let t0 = Instant::now();
     let (ch, proof) = prove(&params, &groups);
     println!("prove:  {:?}", t0.elapsed());
+    let rounds = proof.sc1_bilinear.rounds.len()
+        + proof.sc_quotient.rounds.len()
+        + proof.sc_batched.rounds.len()
+        + proof.sc4_bit.rounds.len()
+        + proof.sc5_onehot.rounds.len();
+    println!("proof: 5 sumchecks, {rounds} rounds total");
 
     let t1 = Instant::now();
     let ok = verify(&params, &ch, &proof);

@@ -1,12 +1,33 @@
-use crate::ext_field::Fq4;
-use crate::field::{reduce64, Fq, C};
-use crate::ntt::negacyclic_mul_1536;
+
+use crate::ext_field::FqExt;
+use crate::field::Fq;
+use crate::ntt::negacyclic_mul_n;
 use std::ops::{Add, Mul, Neg, Sub};
 
-pub const N: usize = 1536;
+pub const N: usize = 512;
 
-pub const BASE: u64 = 2;
-pub const DELTA: usize = 32;
+const _: () = assert!(N.is_power_of_two(), "N must be a power of two, otherwise X^N+1 is reducible (P1)");
+
+#[cfg(feature = "q32")]
+pub const DIGIT_BITS: usize = 1;
+#[cfg(feature = "q64")]
+pub const DIGIT_BITS: usize = 8;
+
+pub const GADGET_BASE: u64 = 1 << DIGIT_BITS;
+
+pub const W_RANGE_BASE: u64 = 2;
+
+#[cfg(feature = "q32")]
+pub const M_BIT_ROWS: usize = 32;
+#[cfg(feature = "q64")]
+pub const M_BIT_ROWS: usize = 64;
+
+pub const GADGET_LEN: usize = M_BIT_ROWS / DIGIT_BITS;
+
+const _: () = assert!(
+    GADGET_LEN * DIGIT_BITS == M_BIT_ROWS,
+    "DIGIT_BITS must divide M_BIT_ROWS, otherwise the top digit is not filled"
+);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RingElem {
@@ -24,35 +45,20 @@ impl RingElem {
         r
     }
 
-    pub fn eval(&self, alpha: Fq4) -> Fq4 {
+    pub fn eval(&self, alpha: FqExt) -> FqExt {
         poly_eval(&self.c, alpha)
     }
 }
 
-pub fn poly_eval(coeffs: &[Fq], alpha: Fq4) -> Fq4 {
-    let mut acc = Fq4::ZERO;
+pub fn poly_eval(coeffs: &[Fq], alpha: FqExt) -> FqExt {
+    let mut acc = FqExt::ZERO;
     for &c in coeffs.iter().rev() {
-        acc = acc * alpha + Fq4::from_fq(c);
+        acc = acc * alpha + FqExt::from_fq(c);
     }
     acc
 }
 
-pub fn poly_eval_pows(coeffs: &[Fq], alpha_pows: &[Fq4]) -> Fq4 {
-    let mut acc = [0u64; 4];
-    for (&c, ap) in coeffs.iter().zip(alpha_pows) {
-        let cv = c.0 as u64;
-        for k in 0..4 {
-            let p = cv * ap.0[k].0 as u64;
-            acc[k] += (p & 0xFFFF_FFFF) + C * (p >> 32);
-        }
-    }
-    Fq4([
-        Fq(reduce64(acc[0])),
-        Fq(reduce64(acc[1])),
-        Fq(reduce64(acc[2])),
-        Fq(reduce64(acc[3])),
-    ])
-}
+pub use crate::ext_field::poly_eval_pows;
 
 impl Add for &RingElem {
     type Output = RingElem;
@@ -78,7 +84,7 @@ impl Neg for &RingElem {
 impl Mul for &RingElem {
     type Output = RingElem;
     fn mul(self, r: &RingElem) -> RingElem {
-        RingElem { c: negacyclic_mul_1536(&self.c, &r.c) }
+        RingElem { c: negacyclic_mul_n(&self.c, &r.c) }
     }
 }
 
@@ -102,23 +108,32 @@ pub fn reduce_full(full: &[Fq]) -> (RingElem, Vec<Fq>) {
 }
 
 pub fn gadget_scalar(d: usize) -> Fq {
-    Fq::new(BASE.pow(d as u32))
+    debug_assert!(d < GADGET_LEN);
+    Fq::new(GADGET_BASE.pow(d as u32))
+}
+
+pub fn bit_weight(k: usize) -> Fq {
+    debug_assert!(k < M_BIT_ROWS);
+    Fq::new(1u64 << k)
 }
 
 pub fn gadget_decompose(a: &RingElem) -> Vec<RingElem> {
-    const _: () = assert!(BASE == 2, "此特化假設 base-2 gadget");
-    (0..DELTA)
-        .map(|d| RingElem { c: a.c.iter().map(|&x| Fq((x.0 >> d) & 1)).collect() })
+    const MASK: u64 = GADGET_BASE - 1;
+    (0..GADGET_LEN)
+        .map(|d| {
+            let sh = d * DIGIT_BITS;
+            RingElem { c: a.c.iter().map(|&x| Fq(((x.0 as u64 >> sh) & MASK) as _)).collect() }
+        })
         .collect()
 }
 
 pub fn gadget_decompose_slice(coeffs: &[Fq]) -> Vec<Vec<Fq>> {
-    let mut out = vec![vec![Fq::ZERO; coeffs.len()]; DELTA];
+    let mut out = vec![vec![Fq::ZERO; coeffs.len()]; GADGET_LEN];
     for (i, &coef) in coeffs.iter().enumerate() {
         let mut v = coef.0 as u64;
-        for d in 0..DELTA {
-            out[d][i] = Fq::new(v % BASE);
-            v /= BASE;
+        for d in 0..GADGET_LEN {
+            out[d][i] = Fq::new(v % GADGET_BASE);
+            v /= GADGET_BASE;
         }
         debug_assert_eq!(v, 0);
     }
@@ -147,6 +162,64 @@ mod tests {
     }
 
     #[test]
+    fn modulus_is_irreducible_over_z() {
+        assert!(N.is_power_of_two(), "N = {N} is not a power of two => X^N+1 is reducible (P1)");
+        assert_eq!(M_BIT_ROWS, (64 - crate::field::Q.leading_zeros()) as usize);
+    }
+
+    #[test]
+    fn gadget_constants_are_consistent() {
+        assert_eq!(GADGET_BASE, 1u64 << DIGIT_BITS);
+        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "digit grouping must exactly cover M_BIT_ROWS");
+        assert_eq!(
+            M_BIT_ROWS,
+            (64 - crate::field::Q.leading_zeros()) as usize,
+            "M_BIT_ROWS must be ceil(log2 q)"
+        );
+        assert_eq!(W_RANGE_BASE, 2, "the W table only ever holds bits");
+        assert!(
+            (GADGET_LEN as u32) * (DIGIT_BITS as u32) >= 64 - crate::field::Q.leading_zeros(),
+            "gadget is too short: the top digit's range does not cover q"
+        );
+    }
+
+    #[test]
+    fn bit_weight_is_the_composite_gadget() {
+        for d in 0..GADGET_LEN {
+            for b in 0..DIGIT_BITS {
+                let composed = gadget_scalar(d) * Fq::new(1u64 << b);
+                assert_eq!(composed, bit_weight(d * DIGIT_BITS + b), "d={d} b={b}");
+            }
+        }
+        if DIGIT_BITS == 1 {
+            for k in 0..M_BIT_ROWS {
+                assert_eq!(gadget_scalar(k), bit_weight(k));
+            }
+        }
+    }
+
+    #[test]
+    fn two_level_decomposition_roundtrip() {
+        let mut rng = SimpleRng::new(20260801);
+        let a = random_elem(&mut rng);
+        let digits = gadget_decompose(&a);
+        assert_eq!(digits.len(), GADGET_LEN);
+        let mut acc = RingElem::zero();
+        for (d, dig) in digits.iter().enumerate() {
+            for i in 0..N {
+                let v = dig.c[i].0 as u64;
+                assert!(v < GADGET_BASE, "digit out of range [0,B)");
+                for b in 0..DIGIT_BITS {
+                    let bit = (v >> b) & 1;
+                    assert!(bit < W_RANGE_BASE, "the second layer must be bits");
+                    acc.c[i] = acc.c[i] + bit_weight(d * DIGIT_BITS + b) * Fq::new(bit);
+                }
+            }
+        }
+        assert_eq!(acc, a, "the two-layer decomposition does not recompose to the original value");
+    }
+
+    #[test]
     fn quotient_identity_at_random_alpha() {
         let mut rng = SimpleRng::new(42);
         let a = random_elem(&mut rng);
@@ -156,7 +229,7 @@ mod tests {
 
         let alpha = rng.next_fq4();
         let lhs = poly_eval(&full, alpha);
-        let rhs = red.eval(alpha) + (alpha.pow(N as u128) + Fq4::ONE) * poly_eval(&t, alpha);
+        let rhs = red.eval(alpha) + (alpha.pow(N as u128) + FqExt::ONE) * poly_eval(&t, alpha);
         assert_eq!(lhs, rhs);
         assert_eq!(lhs, a.eval(alpha) * b.eval(alpha));
     }
@@ -177,10 +250,10 @@ mod tests {
         let mut rng = SimpleRng::new(7);
         let a = random_elem(&mut rng);
         let digits = gadget_decompose(&a);
-        assert_eq!(digits.len(), DELTA);
+        assert_eq!(digits.len(), GADGET_LEN);
         for m in &digits {
             for &c in &m.c {
-                assert!(c.0 < BASE as u32);
+                assert!((c.0 as u64) < GADGET_BASE);
             }
         }
         assert_eq!(gadget_recompose(&digits), a);
