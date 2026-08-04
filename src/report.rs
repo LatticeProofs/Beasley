@@ -1,4 +1,3 @@
-
 use crate::ext_field::EXT_DEG;
 use crate::nizk1::Nizk1Params;
 use crate::params::HashParams;
@@ -213,7 +212,7 @@ fn num_quotients_of(params: &HashParams, nz: &Nizk1Params) -> usize {
 impl ParamReport {
     pub fn print(&self) {
         let kb = |b: usize| b as f64 / 1024.0;
-        println!("\n=== parameters ===");
+        println!("\n=== Parameters ===");
         println!(
             "  q = 2^{} − {}   N = {}   δ = {}   ℓ = {}   |x| = {}   g = {}",
             self.q_bits,
@@ -229,12 +228,12 @@ impl ParamReport {
             self.r_dim, self.com_n, self.w_slack, self.rho_r_len, self.rho_x_len, self.hpack_len
         );
         println!("
-=== lattice dimensions (all must be >= {:.0}, delta_0 = {}, sigma = {:.3}) ===", self.lattice.target, TARGET_DELTA0, SIGMA);
+=== Lattice dimensions (all must be >= {:.0}, delta_0 = {}, sigma = {:.3}) ===", self.lattice.target, TARGET_DELTA0, SIGMA);
         for (name, n) in self.lattice.all() {
-            let ok = if (n as f64) >= self.lattice.target { "OK" } else { "**INSUFFICIENT**" };
+            let ok = if (n as f64) >= self.lattice.target { "OK" } else { "**TOO SMALL**" };
             println!("  {name:<16} = {n:>6}   {ok}");
         }
-        println!("\n=== cube dimensions ===");
+        println!("\n=== Cube dimensions ===");
         println!(
             "  num_m_rows {} + extra {} → kw_pad {} → nv_w {}",
             self.num_m_rows, self.extra_w_rows, self.kw_pad, self.nv_w
@@ -252,16 +251,16 @@ impl ParamReport {
         for (k, lq) in &self.min_log_q {
             println!("    kappa = {:<3} requires log q >= {:.1}", k, lq);
         }
-        println!("\n=== per-query communication (client -> server) ===");
+        println!("\n=== Communication per query (client -> server) ===");
         println!("  1 ring element = N*ceil(log q/8) = {} B", self.ring_elem_bytes);
-        println!("  C_x   {:>3} ring elems = {:>8.2} KB", self.ell, kb(self.c_x_bytes));
+        println!("  C_x   {:>3} ring elements = {:>8.2} KB", self.ell, kb(self.c_x_bytes));
         println!(
-            "  c_r   {:>3} ring elems = {:>8.2} KB   <- decision B1 (no preprocessing) => sent online",
+            "  c_r   {:>3} ring elements = {:>8.2} KB   <- decision B1 (no preprocessing) => sent online",
             self.c_r_bytes / self.ring_elem_bytes,
             kb(self.c_r_bytes)
         );
         println!(
-            "  d_x   {:>3} ring elems = {:>8.2} KB   (committing to x's {} bits instead: {:.2} KB)",
+            "  d_x   {:>3} ring elements = {:>8.2} KB   (if committing to x's {} bits instead: {:.2} KB)",
             self.d_x_bytes / self.ring_elem_bytes,
             kb(self.d_x_bytes),
             self.n_bits,
@@ -275,14 +274,14 @@ impl ParamReport {
             kb(self.pcs_unbatched_bytes)
         );
         println!(
-            "    └ ZK mask folded into c_t's linear opening; a separate fourth commitment would add {:.2} KB",
+            "    ZK mask folded into the linear opening of c_t; a separate fourth commitment would cost {:.2} KB more",
             kb(self.pcs_mask_own_commitment_bytes)
         );
-        println!("  ⚠️ see the `proof size` line for the sumcheck transcript size (measured locally)");
+        println!("  NOTE: for the sumcheck transcript size see the `proof size` line (measured locally)");
         println!(
-            "\n  compare LeOPaRd Table 4 (d=64, h=1, beta_r=1): client online 9.59-58.75 KB (w/o NIZK)"
+            "\n  Compare LeOPaRd Table 4 (d=64, h=1, beta_r=1): client online 9.59-58.75 KB (w/o NIZK)"
         );
-        println!("  + NIZK estimated at 45 KB (their LaBRADOR+LNP22 estimate)");
+        println!("  + NIZK estimate 45 KB (their own LaBRADOR+LNP22 estimate)");
     }
 }
 
@@ -337,7 +336,7 @@ mod tests {
         #[cfg(feature = "q64")]
         let want = 2509.0;
         let t = min_lattice_dim(crate::field::Q, SIGMA, TARGET_DELTA0);
-        assert!((t - want).abs() < 2.0, "closed form for the target dimension drifted: {t} (expected {want})");
+        assert!((t - want).abs() < 2.0, "the closed form for the target dimension drifted: {t} (expected {want})");
     }
 
     #[test]
@@ -353,7 +352,7 @@ mod tests {
         let r = report(&params, &nz, 2, 1);
         let base = (r.n_ring as f64 * (2.0 * r.bf + 1.0) * r.p_round as f64).log2();
         for (k, lq) in &r.min_log_q {
-            assert!((lq - base - *k as f64).abs() < 1e-9, "inverse solve for kappa={k} is inconsistent");
+            assert!((lq - base - *k as f64).abs() < 1e-9, "the inverse solve for kappa={k} is inconsistent");
         }
         #[cfg(feature = "q32")]
         let (lo, hi) = (9.0, 10.0);

@@ -1,4 +1,3 @@
-
 pub const RATE: usize = 168;
 
 const RC: [u64; 24] = [

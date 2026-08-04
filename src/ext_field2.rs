@@ -1,4 +1,3 @@
-
 use crate::field::{reduce128, Fq, C, Q};
 use std::ops::{Add, Mul, Neg, Sub};
 
@@ -220,7 +219,7 @@ mod tests {
         let got_w = poly_eval_pows(&worst, &wp);
         let want_w =
             worst.iter().zip(&wp).fold(Fq2::ZERO, |acc, (&c, &ap)| acc + c * ap);
-        assert_eq!(got_w, want_w, "unreduced accumulation bound overflowed");
+        assert_eq!(got_w, want_w, "the unreduced-accumulation bound overflowed");
     }
 
     #[test]

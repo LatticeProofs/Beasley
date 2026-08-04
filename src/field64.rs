@@ -1,4 +1,3 @@
-
 use std::ops::{Add, Mul, Neg, Sub};
 
 pub const Q: u64 = 18446744073709551359;
@@ -177,7 +176,7 @@ mod tests {
             let b = Fq::new(bad);
             assert!(
                 factors.iter().any(|&p| b.pow((Q - 1) / p) == Fq::ONE),
-                "{bad} is unexpectedly a generator"
+                "{bad} unexpectedly is a generator"
             );
         }
     }

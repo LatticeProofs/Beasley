@@ -1,4 +1,3 @@
-
 use crate::bits::PackedBits;
 use crate::ext_field::{Fq2, FqExt, EXT_DEG};
 use crate::field::{reduce128, Fq, C, Q};

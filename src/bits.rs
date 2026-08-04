@@ -1,4 +1,3 @@
-
 pub struct PackedBits {
     words: Vec<u64>,
     len: usize,

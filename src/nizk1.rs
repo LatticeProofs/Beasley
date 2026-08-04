@@ -1,4 +1,3 @@
-
 use crate::field::Fq;
 use crate::hash::HashWitness;
 use crate::ntt::{full_inner_product, neg_and_quotient_rows, to_spectra, Spectra};
@@ -21,7 +20,7 @@ pub const W_SLACK: usize = 5;
 
 pub const HPACK_BITS: usize = 512;
 
-const _: () = assert!(HPACK_BITS.is_power_of_two() && HPACK_BITS <= N, "an h_pack row does not fit in a single ring element");
+const _: () = assert!(HPACK_BITS.is_power_of_two() && HPACK_BITS <= N, "one h_pack row does not fit into a single ring element");
 
 pub struct ComKey {
     pub a: Vec<Vec<RingElem>>,
@@ -32,7 +31,7 @@ pub struct ComKey {
 impl ComKey {
     pub fn sample(rng: &mut CsRng, com_n: usize, msg_len: usize, w: usize) -> Self {
         let rho_len = com_n + msg_len + w;
-        assert!(rho_len > com_n + msg_len, "Appendix F hiding requires w >= 1");
+        assert!(rho_len > com_n + msg_len, "the hiding of Appendix F requires w >= 1");
         let re = |rng: &mut CsRng| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() };
         let a: Vec<Vec<RingElem>> =
             (0..com_n).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect();
@@ -302,7 +301,7 @@ pub fn check_blind(
 
 pub const ZK_MASK_ROWS: usize = 1;
 
-const _: () = assert!(ZK_MASK_ROWS >= 1, "the witness-level ZK mask needs at least one row");
+const _: () = assert!(ZK_MASK_ROWS >= 1, "ZK witness-level masking needs at least one row");
 
 pub fn zk_mask_rows(rng: &mut CsRng) -> Vec<RingElem> {
     rand_bits(rng, ZK_MASK_ROWS)
@@ -442,7 +441,7 @@ mod tests {
                 .sum();
             assert!(
                 ones > total * 40 / 100 && ones < total * 60 / 100,
-                "{name} imbalance: {ones}/{total}"
+                "{name} imbalanced: {ones}/{total}"
             );
         }
     }

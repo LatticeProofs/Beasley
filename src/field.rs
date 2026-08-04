@@ -1,4 +1,3 @@
-
 use std::ops::{Add, Mul, Neg, Sub};
 
 pub const Q: u64 = 4294967197;

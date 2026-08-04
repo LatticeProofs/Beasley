@@ -1,4 +1,3 @@
-
 use crate::ext_field::FqExt;
 use crate::field::{fq_from_words, Fq, FQ_BYTES, Q};
 use crate::keccak::Shake128;
@@ -172,7 +171,7 @@ mod tests {
         let all = [by_u64, by_fq, by_fqs, by_fq4];
         for i in 0..4 {
             for j in i + 1..4 {
-                assert_ne!(all[i], all[j], "type tag {i} collides with {j}");
+                assert_ne!(all[i], all[j], "type tags {i} and {j} collide");
             }
         }
         let two = Fq::new(2);

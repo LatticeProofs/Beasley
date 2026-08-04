@@ -1,4 +1,3 @@
-
 use crate::ext_field::FqExt;
 use crate::field::{Fq, Q};
 use crate::keccak::Shake128;
@@ -154,5 +153,53 @@ mod tests {
             v
         };
         assert_eq!(run(), run());
+    }
+}
+
+#[cfg(test)]
+mod throughput {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn shake128_throughput() {
+        use std::time::Instant;
+        const NFQ: usize = 4_000_000;
+
+        let mut rng = CsRng::from_parts("bench", &[b"seed"]);
+        let t = Instant::now();
+        let mut acc = 0u64;
+        for _ in 0..NFQ {
+            acc ^= rng.next_fq().0 as u64;
+        }
+        let d = t.elapsed();
+        let mbs = NFQ as f64 * crate::field::FQ_BYTES as f64 / 1e6 / d.as_secs_f64();
+        println!("squeeze  next_fq : {:.1} M Fq/s = {:.0} MB/s", NFQ as f64 / 1e6 / d.as_secs_f64(), mbs);
+
+        let v: Vec<Fq> = (0..8192).map(|i| Fq(i as _)).collect();
+        let reps = NFQ / v.len();
+        let mut tr = crate::transcript::Transcript::new("bench");
+        let t = Instant::now();
+        for _ in 0..reps {
+            tr.absorb_fqs(&v);
+        }
+        let d2 = t.elapsed();
+        let mbs2 = (reps * v.len()) as f64 * crate::field::FQ_BYTES as f64 / 1e6 / d2.as_secs_f64();
+        println!("absorb   fqs     : {:.0} MB/s", mbs2);
+
+        let mut a = crate::aesprg::AesPrg::from_parts("bench", &[b"seed"]);
+        let t = Instant::now();
+        for _ in 0..NFQ {
+            acc ^= a.next_fq().0 as u64;
+        }
+        let d3 = t.elapsed();
+        let mbs3 = NFQ as f64 * crate::field::FQ_BYTES as f64 / 1e6 / d3.as_secs_f64();
+        println!(
+            "AES-CTR  next_fq : {:.1} M Fq/s = {:.0} MB/s   ({:.1}x vs SHAKE128)",
+            NFQ as f64 / 1e6 / d3.as_secs_f64(),
+            mbs3,
+            d.as_secs_f64() / d3.as_secs_f64()
+        );
+        println!("black_box {acc:x}");
     }
 }

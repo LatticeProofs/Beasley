@@ -1,4 +1,3 @@
-
 use crate::bits::PackedBits;
 use crate::ext_field::FqExt;
 use crate::field::Fq;

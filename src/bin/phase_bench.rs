@@ -100,7 +100,7 @@ fn main() {
         let d = t.elapsed();
         let fq = nz.r_dim * params.ell * voprf::ring::N;
         println!(
-            "derive_ar:         {:?}  ({} F_q = {} KB XOF; r_dim={} ell={})",
+            "derive_ar:         {:?}  ({} F_q elements = {} KB XOF; r_dim={} ell={})",
             d,
             fq,
             fq * voprf::field::FQ_BYTES / 1024,
@@ -145,7 +145,7 @@ fn main() {
         + proof.open_hpack.is_some() as usize;
     let ext_bytes = voprf::ext_field::EXT_DEG * voprf::field::FQ_BYTES;
     println!(
-        "proof size:        {} F_q^{} = {} bytes ({} rounds; {})",
+        "proof size:        {} F_q^{} elements = {} bytes ({} rounds; {})",
         vals + scalars,
         voprf::ext_field::EXT_DEG,
         (vals + scalars) * ext_bytes,
@@ -168,7 +168,7 @@ fn main() {
     if nizk1 == 1 {
         voprf::report::report(&params, &nz, 2, 1).print();
         println!(
-            "  sumcheck transcript                  = {:>8.2} KB (measured locally, see proof size above)",
+            "  sumcheck transcript                  = {:>8.2} KB (measured locally, see the proof size line above)",
             (vals + scalars) as f64 * ext_bytes as f64 / 1024.0
         );
     }

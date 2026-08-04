@@ -1,4 +1,3 @@
-
 use crate::bits::PackedBits;
 use crate::ext_field::{FqExt, LazyExtSum, EXT_DEG};
 use crate::field::Fq;
@@ -25,7 +24,7 @@ pub const W_COEF_SLOTS: usize = 1 << W_COEF_VARS;
 pub const T_COEF_VARS: usize = W_COEF_VARS + 1;
 pub const T_COEF_SLOTS: usize = 1 << T_COEF_VARS;
 
-const _: () = assert!(W_COEF_SLOTS == N, "W must have exactly N slots");
+const _: () = assert!(W_COEF_SLOTS == N, "the W slot count must be exactly N");
 const _: () = assert!(T_COEF_SLOTS > N, "T needs a free region of >= N slots for the ZK mask");
 
 pub struct Proof {
@@ -104,7 +103,7 @@ fn mask_slot(d: &Dims, flat: usize) -> usize {
     let cell = flat / free;
     assert!(
         cell < d.c_cells,
-        "ZK mask coefficients do not fit t_full's free region: need > {} cells, only {} available",
+        "the ZK mask coefficients do not fit the free region of t_full: need > {} cells, only {} available",
         flat,
         d.c_cells * free
     );
@@ -301,7 +300,7 @@ fn dims(params: &HashParams, nz: Option<&Nizk1Ctx>) -> Dims {
 
 fn put_bits(zw: &mut PackedBits, k: usize, poly: &[Fq]) {
     let acc = poly.iter().fold(0u64, |a, &v| a | v.0 as u64);
-    assert!(acc < W_RANGE_BASE, "W may only hold bits, got a row containing {acc} (missing base-2 decomposition of the digit? see q64.md §4b)");
+    assert!(acc < W_RANGE_BASE, "W may only hold bits, got a row containing {acc} (did the digit skip its base-2 decomposition? see q64.md 4b)");
     let base = k * W_COEF_SLOTS;
     for (c, &v) in poly.iter().enumerate() {
         zw.or_bit(base + c, v.0 as u32);
@@ -446,7 +445,7 @@ pub(crate) fn prove_impl(
         let blk = &mut wit.m[0][chain * GADGET_LEN..(chain + 1) * GADGET_LEN];
         let v = blk.iter().rev().fold(0u128, |acc, e| (acc << DIGIT_BITS) | e.c[coef].0 as u128);
         let alt = v + crate::field::Q as u128;
-        assert!(alt < 1u128 << M_BIT_ROWS, "coefficient {v} >= 2^{M_BIT_ROWS}-q, no alternative bit representation");
+        assert!(alt < 1u128 << M_BIT_ROWS, "coefficient value {v} >= 2^{M_BIT_ROWS}-q, so there is no second bit representation");
         for (dg, e) in blk.iter_mut().enumerate() {
             e.c[coef] = Fq(((alt >> (dg * DIGIT_BITS)) & (GADGET_BASE as u128 - 1)) as _);
         }
@@ -1061,7 +1060,7 @@ mod tests {
         let bad_v = (groups[0] + 1) % params.table_size();
         let (ch, _, proof, _) =
             prove_impl(&params, &groups, Sabotage::ExtraOneHot { step: 0, v: bad_v }, None);
-        assert!(!verify(&params, &ch, &proof), "non-1-hot witness unexpectedly verified");
+        assert!(!verify(&params, &ch, &proof), "a non-1-hot witness unexpectedly passed verification");
     }
 
     #[test]
@@ -1069,15 +1068,13 @@ mod tests {
         let mut params = HashParams::sample(4242, 16, 8, 1);
         let groups = vec![7usize, 200usize];
         params.table[groups[1]][0].c[3] = Fq::new(5);
-        params.crs_digest =
-            crate::params::crs_digest(params.n_bits, params.group_bits, params.ell, &params.table);
 
         let (ch, proof) = prove(&params, &groups);
-        assert!(verify(&params, &ch, &proof), "honest proof must verify");
+        assert!(verify(&params, &ch, &proof), "an honest proof must verify");
 
         let (ch2, _, proof2, _) =
             prove_impl(&params, &groups, Sabotage::NonCanonicalDigit { chain: 0, coef: 3 }, None);
-        assert_ne!(ch, ch2, "non-canonical decomposition did not change c_H -- the test has no discriminating power");
+        assert_ne!(ch, ch2, "the non-canonical decomposition did not change c_H -- this test has no discriminating power");
         assert!(
             verify(&params, &ch2, &proof2),
             "(if this starts failing, the canonical constraint has been added -- change this test to assert !verify)"
@@ -1090,7 +1087,7 @@ mod tests {
             let (params, groups) = setup(8, 2, 1, 79 + step as u64);
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::ZeroOneHotRow { step }, None);
-            assert!(!verify(&params, &ch, &proof), "step {step}: zeroing the whole row unexpectedly passed");
+            assert!(!verify(&params, &ch, &proof), "step {step} with a fully zeroed row unexpectedly passed");
         }
     }
 
@@ -1112,7 +1109,7 @@ mod tests {
         for idx in [0usize, nq - 1] {
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::WrongQuotient { idx }, None);
-            assert!(!verify(&params, &ch, &proof), "forged quotient {idx} unexpectedly passed");
+            assert!(!verify(&params, &ch, &proof), "a forged quotient {idx} unexpectedly passed");
         }
     }
 
@@ -1121,7 +1118,7 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(301, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongRho { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged rho unexpectedly passed");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged rho unexpectedly passed");
     }
 
     #[test]
@@ -1129,19 +1126,19 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(302, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongHpack { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged h_pack unexpectedly passed");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged h_pack unexpectedly passed");
     }
 
     #[test]
     fn w_slots_exactly_fill_the_ring() {
-        assert_eq!(W_COEF_SLOTS, N, "a W row must have exactly N slots (otherwise the G10 attack surface returns)");
+        assert_eq!(W_COEF_SLOTS, N, "the slot count of one W row must be exactly N (otherwise the G10 attack surface returns)");
         assert!(T_COEF_SLOTS > N);
         let alpha = FqExt::from_u64(12345);
         let mut ap = FqExt::ONE;
         for s in 0..T_COEF_SLOTS {
             let w = if s < N { ap } else { FqExt::ZERO };
             if s >= N {
-                assert_eq!(w, FqExt::ZERO, "a high slot of T unexpectedly has a non-zero alpha weight");
+                assert_eq!(w, FqExt::ZERO, "the high slots of T unexpectedly carry a non-zero alpha weight");
             }
             ap = ap * alpha;
         }
@@ -1188,7 +1185,7 @@ mod tests {
                 assert_eq!(
                     zw.get(k * W_COEF_SLOTS + c),
                     (v >> k) & 1 == 1,
-                    "bit {k} of coefficient {c} is wrong (two-layer grouping disagrees with the base-2 expansion)"
+                    "bit {k} of coefficient {c} is wrong (the two-layer grouping disagrees with the base-2 expansion)"
                 );
             }
         }
@@ -1199,7 +1196,7 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(303, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongCxBlinding, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forged (N1) unexpectedly passed");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged (N1) unexpectedly passed");
     }
 
     #[test]
@@ -1223,7 +1220,7 @@ mod tests {
             Sabotage::WrongQuotient { idx: crate::relation::num_quotients(&params, None) - 1 },
         ] {
             let (ch, _, proof, _) = prove_impl(&params, &groups, sab, None);
-            assert!(!verify(&params, &ch, &proof), "{sab:?} unexpectedly passed at ell=2");
+            assert!(!verify(&params, &ch, &proof), "{sab:?} unexpectedly passed with ell=2");
         }
     }
 
@@ -1291,7 +1288,7 @@ mod tests {
                 1 => proof.c_h.num_vars -= 1,
                 _ => proof.c_t.num_vars += 1,
             }
-            assert!(!verify(&params, &ch, &proof), "commitment {which} with mismatched arity unexpectedly passed");
+            assert!(!verify(&params, &ch, &proof), "commitment {which} with a mismatched arity unexpectedly passed");
         }
     }
 
@@ -1419,7 +1416,7 @@ mod tests {
             assert_ne!(
                 pcs::open(&zw1, &r),
                 pcs::open(&zw2, &r),
-                "the mask rows did not affect W~(r) -- layer (ii) is not in effect"
+                "the mask rows did not affect W~(r) -- layer (ii) had no effect"
             );
         }
     }
@@ -1435,12 +1432,12 @@ mod tests {
             let rows = build_rows(&params, &st.c_x, rng.next_fq4(), Some(&ctx));
             let lo = ctx.w.mask;
             let hi = ctx.w.total;
-            assert!(hi > lo, "mask segment has length 0");
+            assert!(hi > lo, "the mask segment has length 0");
             for row in &rows.lin {
                 for &(k, _) in &row.m_entries {
                     assert!(
                         !(lo..hi).contains(&k),
-                        "constraint {:?} points at mask row {k} (would break soundness)",
+                        "constraint {:?} points at mask row {k} (this would break soundness)",
                         row.kind
                     );
                 }
@@ -1479,7 +1476,7 @@ mod tests {
             }
             for cell in 0..d.c_cells {
                 for slot in 0..N {
-                    assert_eq!(t[cell * T_COEF_SLOTS + slot], Fq::ZERO, "mask collides with the quotient region");
+                    assert_eq!(t[cell * T_COEF_SLOTS + slot], Fq::ZERO, "the mask collided with the quotient region");
                 }
             }
 
@@ -1498,7 +1495,7 @@ mod tests {
                 assert_eq!(
                     pcs::open_linear(&t, &mask_weights(&d, bases[i], &wt)),
                     expect,
-                    "cannot recover the sum of mask {i} (n={n} g={g} ell={ell})"
+                    "the sum for mask {i} cannot be recovered (n={n} g={g} ell={ell})"
                 );
                 let r: Vec<FqExt> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
                 for (j, &rj) in r.iter().enumerate() {
@@ -1510,7 +1507,7 @@ mod tests {
                         &mask_weights(&d, bases[i], &sumcheck::Masker::weights_eval(nv, deg, &r))
                     ),
                     ms[i].eval(),
-                    "cannot recover g(r) of mask {i}"
+                    "g(r) for mask {i} cannot be recovered"
                 );
             }
         }

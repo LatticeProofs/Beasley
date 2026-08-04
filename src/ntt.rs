@@ -1,4 +1,3 @@
-
 use crate::field::{Fq, Q};
 use crate::ring::{RingElem, GADGET_BASE, N};
 use rayon::prelude::*;
@@ -17,7 +16,7 @@ const _: () = assert!(L.is_power_of_two());
 const _: () = {
     let mut i = 0;
     while i < PRIMES.len() {
-        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support a negacyclic-L NTT");
+        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support the negacyclic-L NTT");
         i += 1;
     }
 };
@@ -55,7 +54,7 @@ fn fwd_into(a: &[Fq], p: u64, plan: &Plan, buf: &mut [u32]) {
 }
 
 fn fwd_small_into(a: &[Fq], plan: &Plan, buf: &mut [u32]) {
-    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digit must be < every RNS prime to skip the % p");
+    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digits must be < every RNS prime so the % p can be skipped");
     buf.fill(0);
     for (i, &v) in a.iter().enumerate() {
         debug_assert!((v.0 as u64) < GADGET_BASE);
@@ -80,7 +79,7 @@ macro_rules! with_prime {
                 const $p: u64 = PRIMES[2];
                 $body
             }
-            other => unreachable!("with_prime!: only {} PRIMES, got index {}", NPRIMES, other),
+            other => unreachable!("with_prime!: PRIMES has only {} entries, got index {}", NPRIMES, other),
         }
     };
 }
@@ -109,7 +108,7 @@ macro_rules! with_prime {
                 const $p: u64 = PRIMES[4];
                 $body
             }
-            other => unreachable!("with_prime!: only {} PRIMES, got index {}", NPRIMES, other),
+            other => unreachable!("with_prime!: PRIMES has only {} entries, got index {}", NPRIMES, other),
         }
     };
 }
@@ -201,13 +200,13 @@ fn crt_modq<const K: usize>(r: [u64; K]) -> Fq {
 }
 
 const _: () = {
-    assert!(M_MOD_Q[0] == 1, "the 0-th mixed-radix weight must be 1");
+    assert!(M_MOD_Q[0] == 1, "the 0th mixed-radix weight must be 1");
     let mut i = 0;
     while i < NPRIMES {
-        assert!(PRIMES[i] < Q, "RNS primes must be < q (precondition for the reduction-free 0-th term)");
+        assert!(PRIMES[i] < Q, "RNS primes must be < q (precondition for the reduction-free 0th term)");
         let mut j = 0;
         while j < NPRIMES {
-            assert!(PRIMES[j] < 2 * PRIMES[i], "primes must be within a factor of 2 (precondition for a single conditional subtraction)");
+            assert!(PRIMES[j] < 2 * PRIMES[i], "primes differ by less than a factor of 2 (precondition for a single conditional subtraction)");
             j += 1;
         }
         i += 1;
@@ -248,7 +247,7 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
     assert!(cols.len() <= specs.len());
     debug_assert!(
         cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE)         -- the RNS bound for NHOT primes depends on it"
+        "hot-path precondition: the right operand's coefficients must be gadget digits (< GADGET_BASE) -- the RNS bound for NHOT primes depends on it"
     );
 
     let res: Vec<Vec<u32>> = (0..NHOT)
@@ -358,7 +357,7 @@ pub fn neg_and_quotient_rows(
     assert_eq!(specs.len(), rows * ml, "specs must be rows x ml (row-major)");
     debug_assert!(
         cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE)"
+        "hot-path precondition: the right operand's coefficients must be gadget digits (< GADGET_BASE)"
     );
 
     let res: Vec<Vec<Vec<u32>>> = (0..NHOT)
@@ -472,7 +471,7 @@ mod tests {
     #[test]
     fn ntt_length_is_exactly_2n() {
         assert_eq!(L, 2 * N);
-        assert!(L.is_power_of_two(), "L is not a power of two => tfhe-ntt Plan cannot be built");
+        assert!(L.is_power_of_two(), "L is not a power of two => the tfhe-ntt Plan cannot be built");
         for (i, &p) in PRIMES.iter().enumerate() {
             assert_eq!((p - 1) % (2 * L as u64), 0, "p{i} = {p} does not support negacyclic-{L}");
             assert!(Plan::try_new(L, p as u32).is_some(), "Plan({L}) for p{i} cannot be built");
@@ -539,10 +538,10 @@ mod tests {
         }
         assert_eq!(peak, ml as u128 * dm * qm1 * N as u128);
         let modulus: u128 = (0..NHOT).map(|i| PRIMES[i] as u128).product();
-        assert!(peak < modulus, "bound for {NHOT} primes is too small: peak = {peak}, prod p = {modulus}");
+        assert!(peak < modulus, "the bound for {NHOT} primes is too small: peak = {peak}, prod p = {modulus}");
         let bits = 128 - peak.leading_zeros();
         let doc_bits = if DIGIT_BITS == 1 { 48 } else { 87 };
-        assert_eq!(bits, doc_bits, "upper bound is not 2^{doc_bits}: 2^{bits}");
+        assert_eq!(bits, doc_bits, "upper bound is not 2^{doc_bits} (the table in the `ntt.rs` module docs must be kept in sync): 2^{bits}");
 
         let (neg, t) = neg_and_quotient(&specs, &cols);
         for i in 0..N {
@@ -578,7 +577,7 @@ mod tests {
         let iters = 3000;
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / iters as f64;
 
-        println!("\n--- NTT forward microbenchmark (avg over {iters}, single prime; current L = {L}) ---");
+        println!("\n--- NTT forward microbenchmark ({iters}-run average, single prime; current L = {L}) ---");
         for len in [512usize, 1024, 2048, 4096] {
             let Some(plan) = Plan::try_new(len, p) else {
                 println!("  L = {len:<5}   (p = {p} does not support negacyclic-{len}, skipped)");
@@ -635,11 +634,11 @@ mod tests {
             t_spec.as_secs_f64() * 1e6 / GADGET_LEN as f64
         );
         println!(
-            "  neg_and_quotient single call ({} threads)  {:9.1} us",
+            "  neg_and_quotient, one call ({} threads)  {:9.1} us",
             rayon::current_num_threads(),
             t_call
         );
-        println!("  reference: {nfwd} {L}-NTTs (single-threaded, sequential)  {:9.1} us", t_ntt);
-        println!("  pointwise MAC scale: {NHOT} primes x {GADGET_LEN} cols x {L} points = {} ops\n", NHOT * GADGET_LEN * L);
+        println!("  reference: {nfwd} x {L}-NTT (single-threaded, sequential)  {:9.1} us", t_ntt);
+        println!("  pointwise MAC scale: {NHOT} primes x {GADGET_LEN} col x {L} points = {} ops\n", NHOT * GADGET_LEN * L);
     }
 }

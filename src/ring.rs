@@ -1,4 +1,3 @@
-
 use crate::ext_field::FqExt;
 use crate::field::Fq;
 use crate::ntt::negacyclic_mul_n;
@@ -26,7 +25,7 @@ pub const GADGET_LEN: usize = M_BIT_ROWS / DIGIT_BITS;
 
 const _: () = assert!(
     GADGET_LEN * DIGIT_BITS == M_BIT_ROWS,
-    "DIGIT_BITS must divide M_BIT_ROWS, otherwise the top digit is not filled"
+    "DIGIT_BITS must divide M_BIT_ROWS, otherwise the top digit is not full"
 );
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -170,7 +169,7 @@ mod tests {
     #[test]
     fn gadget_constants_are_consistent() {
         assert_eq!(GADGET_BASE, 1u64 << DIGIT_BITS);
-        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "digit grouping must exactly cover M_BIT_ROWS");
+        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "the digit grouping must cover M_BIT_ROWS exactly");
         assert_eq!(
             M_BIT_ROWS,
             (64 - crate::field::Q.leading_zeros()) as usize,
@@ -179,7 +178,7 @@ mod tests {
         assert_eq!(W_RANGE_BASE, 2, "the W table only ever holds bits");
         assert!(
             (GADGET_LEN as u32) * (DIGIT_BITS as u32) >= 64 - crate::field::Q.leading_zeros(),
-            "gadget is too short: the top digit's range does not cover q"
+            "gadget too short: the range of the top digit does not cover q"
         );
     }
 

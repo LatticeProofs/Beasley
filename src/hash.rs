@@ -1,4 +1,3 @@
-
 use crate::field::Fq;
 use crate::ntt::neg_and_quotient_rows;
 use crate::params::HashParams;

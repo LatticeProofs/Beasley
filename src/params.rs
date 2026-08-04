@@ -1,7 +1,6 @@
-
 use crate::ntt::{to_spectra, Spectra};
 use crate::ring::{RingElem, GADGET_LEN, N};
-use crate::rng::CsRng;
+use crate::aesprg::AesPrg;
 use rayon::prelude::*;
 
 #[cfg(feature = "q32")]
@@ -26,7 +25,7 @@ impl HashParams {
     pub fn sample(seed: u64, n_bits: usize, group_bits: usize, ell: usize) -> Self {
         assert!(group_bits >= 1, "g must be at least 1");
         assert!(n_bits % group_bits == 0, "g must divide n_bits");
-        assert!(n_bits / group_bits >= 2, "need at least two groups");
+        assert!(n_bits / group_bits >= 2, "at least two groups are required");
         assert!(ell >= 1, "module rank must be at least 1");
         let tsz = 1usize << group_bits;
         let dims = crs_dims(n_bits, group_bits, ell, tsz);
@@ -35,15 +34,17 @@ impl HashParams {
         let table: Vec<Vec<RingElem>> = (0..tsz)
             .into_par_iter()
             .map(|v| {
-                let mut rng =
-                    CsRng::from_parts("voprf-crs-table-v2", &[&seed.to_le_bytes(), &dims, &v.to_le_bytes()]);
+                let mut rng = AesPrg::from_parts(
+                    "voprf-crs-table-v3-aesctr",
+                    &[&seed.to_le_bytes(), &dims, &v.to_le_bytes()],
+                );
                 (0..cells)
                     .map(|_| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() })
                     .collect()
             })
             .collect();
 
-        let crs_digest = crs_digest(n_bits, group_bits, ell, &table);
+        let crs_digest = crs_digest(seed, n_bits, group_bits, ell);
         let mut p = HashParams { n_bits, group_bits, ell, table, spectra_cache: None, crs_digest };
         if std::env::var_os("VOPRF_CACHE_SPECTRA").is_some() {
             p.precompute_spectra();
@@ -103,7 +104,20 @@ fn crs_dims(n_bits: usize, group_bits: usize, ell: usize, tsz: usize) -> Vec<u8>
     out
 }
 
-pub fn crs_digest(
+pub fn crs_digest(seed: u64, n_bits: usize, group_bits: usize, ell: usize) -> [u8; 32] {
+    let mut tr = crate::transcript::Transcript::new("voprf-crs-v4-seed");
+    tr.absorb_u64(seed);
+    tr.absorb_u64(n_bits as u64);
+    tr.absorb_u64(group_bits as u64);
+    tr.absorb_u64(ell as u64);
+    tr.absorb_u64(ml_of(ell) as u64);
+    tr.absorb_u64(GADGET_LEN as u64);
+    tr.absorb_u64(N as u64);
+    tr.absorb_u64((1usize << group_bits) as u64);
+    tr.finalize_digest()
+}
+
+pub fn crs_digest_from_table(
     n_bits: usize,
     group_bits: usize,
     ell: usize,
@@ -138,7 +152,7 @@ mod tests {
         assert!(p.table.iter().all(|r| r.len() == p.ell * p.ml()));
         for a in 0..p.table_size() {
             for b in (a + 1)..p.table_size() {
-                assert_ne!(p.table[a], p.table[b], "matrix {a} is identical to matrix {b}");
+                assert_ne!(p.table[a], p.table[b], "matrix {a} and matrix {b} are identical");
             }
         }
         let half = 4usize;
@@ -157,7 +171,7 @@ mod tests {
                 combined.push(acc);
             }
         }
-        assert_ne!(p.table[w * half + wp], combined, "table still looks combined (e(T) would fall back to 2)");
+        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would go back to 2)");
     }
 
     #[test]
@@ -171,7 +185,22 @@ mod tests {
         assert_ne!(a.crs_digest, c.crs_digest);
         let d = HashParams::sample(7, 8, 4, 2);
         assert_ne!(a.crs_digest, d.crs_digest);
-        assert_ne!(a.table, d.table, "ell must also be part of the sampling domain");
+        assert_ne!(a.table, d.table, "ell is part of the sampling domain too");
+    }
+
+    #[test]
+    fn seed_determines_the_table() {
+        let a = HashParams::sample(2024, 8, 4, 2);
+        let b = HashParams::sample(2024, 8, 4, 2);
+        let dt = |p: &HashParams| crs_digest_from_table(p.n_bits, p.group_bits, p.ell, &p.table);
+
+        assert_eq!(a.crs_digest, b.crs_digest, "digests for the same seed unexpectedly differ");
+        assert_eq!(a.table, b.table, "the same seed unexpectedly produced different tables -- the premise of the seed-based digest is broken");
+        assert_eq!(dt(&a), dt(&b), "the table-based digest must agree too");
+
+        let c = HashParams::sample(2025, 8, 4, 2);
+        assert_ne!(a.crs_digest, c.crs_digest, "digests for different seeds are unexpectedly identical");
+        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to distinguish CRSs from different seeds");
     }
 
     #[test]

@@ -1,12 +1,12 @@
-
 #[cfg(all(feature = "q32", feature = "q64"))]
 compile_error!("q32 and q64 are mutually exclusive: use --no-default-features --features q64");
 #[cfg(not(any(feature = "q32", feature = "q64")))]
-compile_error!("must specify q32 or q64 (--features q32 or --features q64)");
+compile_error!("either q32 or q64 must be selected (--features q32 or --features q64)");
 
 pub mod bits;
 pub mod keccak;
 pub mod rng;
+pub mod aesprg;
 
 #[cfg(feature = "q32")]
 #[path = "field.rs"]

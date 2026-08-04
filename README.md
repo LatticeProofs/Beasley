@@ -7,5 +7,5 @@ Remove-Item Env:RAYON_NUM_THREADS
 
 
 ```
-powershell -ExecutionPolicy Bypass -File script/bench_median.ps1 -G 8 -Runs 50
+powershell -ExecutionPolicy Bypass -File script/bench_median.ps1 -G 8 -Runs 10
 ```

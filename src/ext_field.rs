@@ -1,4 +1,3 @@
-
 use crate::field::{reduce64, Fq, C, Q};
 use std::ops::{Add, Mul, Neg, Sub};
 

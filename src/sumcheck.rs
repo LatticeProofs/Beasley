@@ -1,4 +1,3 @@
-
 use crate::bits::PackedBits;
 use crate::ext_field::FqExt;
 use crate::field::{Fq, Q};
@@ -1027,7 +1026,7 @@ mod tests {
         let (proof, r_p, _) = batched_w_reference(&w, lg.clone(), &apow, &tau0, lambda, &mut tr_p);
         let mut tr_v = Transcript::new("nb");
         let (e_b, r_v) =
-            verify_batched_w(lambda * claim2, nv_w, &proof, &mut tr_v).expect("well-formed");
+            verify_batched_w(lambda * claim2, nv_w, &proof, &mut tr_v).expect("well-formed proof");
         assert_eq!(r_p, r_v);
 
         let w_at = mle_eval(&w, &r_v);
