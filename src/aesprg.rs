@@ -231,13 +231,13 @@ mod tests {
 
         let mut soft = pt;
         encrypt_block_soft(&rk, &mut soft);
-        assert_eq!(soft, want, "software AES-128 disagrees with FIPS-197 C.1");
+        assert_eq!(soft, want, "software AES-128 does not match FIPS-197 C.1");
 
         let mut blocks = [pt; BLOCKS];
         encrypt_blocks(&rk, &mut blocks);
         for (j, b) in blocks.iter().enumerate() {
             if j == 0 {
-                assert_eq!(*b, want, "encrypt_blocks (possibly via AES-NI) disagrees with FIPS-197 C.1");
+                assert_eq!(*b, want, "encrypt_blocks (possibly via AES-NI) does not match FIPS-197 C.1");
             }
         }
     }

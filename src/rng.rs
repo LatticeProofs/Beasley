@@ -114,7 +114,7 @@ mod tests {
                 hi += 1;
             }
         }
-        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "distribution skewed: upper half {hi}/{N}");
+        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "skewed distribution: upper half {hi}/{N}");
     }
 
     #[test]

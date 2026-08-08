@@ -76,13 +76,22 @@ pub fn verify(
     proof: &SumcheckProof,
     tr: &mut Transcript,
 ) -> Option<(FqExt, Vec<FqExt>)> {
-    if proof.rounds.len() != nv {
+    verify_degs(claim, &vec![deg; nv], proof, tr)
+}
+
+pub fn verify_degs(
+    claim: FqExt,
+    degs: &[usize],
+    proof: &SumcheckProof,
+    tr: &mut Transcript,
+) -> Option<(FqExt, Vec<FqExt>)> {
+    if proof.rounds.len() != degs.len() {
         return None;
     }
     let mut expect = claim;
-    let mut r_point = Vec::with_capacity(nv);
-    for evals in &proof.rounds {
-        if evals.len() != deg + 1 {
+    let mut r_point = Vec::with_capacity(degs.len());
+    for (evals, &d) in proof.rounds.iter().zip(degs) {
+        if evals.len() != d + 1 {
             return None;
         }
         if evals[0] + evals[1] != expect {
@@ -96,6 +105,154 @@ pub fn verify(
         expect = lagrange_eval(evals, r);
     }
     Some((expect, r_point))
+}
+
+#[derive(Clone, Copy)]
+pub struct ClaimMask<'a> {
+    pub coef: &'a [FqExt],
+}
+
+impl ClaimMask<'_> {
+    pub fn eval(&self, x: FqExt) -> FqExt {
+        self.coef.iter().rev().fold(FqExt::ZERO, |a, &c| a * x + c)
+    }
+    pub fn total(&self) -> FqExt {
+        self.coef[0] + self.coef.iter().fold(FqExt::ZERO, |a, &c| a + c)
+    }
+    pub fn deg(&self) -> usize {
+        self.coef.len() - 1
+    }
+    pub fn weights_eval(deg: usize, c: FqExt) -> Vec<FqExt> {
+        let mut out = Vec::with_capacity(deg + 1);
+        let mut p = FqExt::ONE;
+        for _ in 0..=deg {
+            out.push(p);
+            p = p * c;
+        }
+        out
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LinMask(pub [FqExt; 2]);
+
+impl LinMask {
+    #[inline]
+    pub fn eval(&self, z1: FqExt) -> FqExt {
+        self.0[0] + z1 * self.0[1]
+    }
+    #[inline]
+    pub fn weights(z1: FqExt) -> [FqExt; 2] {
+        [FqExt::ONE, z1]
+    }
+}
+
+pub const LIN_MASK_COEFS: usize = 2;
+
+pub fn round_degs(nv: usize, deg: usize, z_deg: usize, w_deg: usize) -> Vec<usize> {
+    let mut d = vec![deg; nv];
+    if let Some(last) = d.last_mut() {
+        *last = z_deg;
+    }
+    d.push(w_deg);
+    d
+}
+
+pub fn prove_bilinear_zk(
+    mut eq: Vec<FqExt>,
+    mut h: Vec<FqExt>,
+    mut u: Vec<FqExt>,
+    sigma_h: LinMask,
+    sigma_u: FqExt,
+    rmask: ClaimMask,
+    mut mask: Option<&mut Masker>,
+    tr: &mut Transcript,
+) -> (SumcheckProof, Vec<FqExt>, FqExt, FqExt, FqExt) {
+    let len = eq.len();
+    assert!(len.is_power_of_two());
+    assert_eq!(h.len(), len);
+    assert_eq!(u.len(), len);
+    let nv = len.trailing_zeros() as usize;
+    let mdeg = rmask.deg();
+    let msum = rmask.total();
+
+    let mut rounds = Vec::with_capacity(nv + 1);
+    let mut r_point = Vec::with_capacity(nv + 1);
+    let mut zpre = FqExt::ONE;
+    let mut ipre = FqExt::ONE;
+
+    for round in 0..nv {
+        let half = eq.len() / 2;
+        let last_cube = round + 1 == nv;
+        let deg = if last_cube { 6 } else { 3 };
+        let pts: Vec<u64> = (0..=deg as u64).collect();
+        let mut evals = Vec::with_capacity(deg + 1);
+        for &s in &pts {
+            let sf = FqExt::from_u64(s);
+            let zc = if last_cube { zpre * sf * (FqExt::ONE - sf) } else { FqExt::ZERO };
+            let (dh, du) = (zc * sigma_h.eval(sf), zc * sigma_u);
+            let mut acc = FqExt::ZERO;
+            for cell in 0..half {
+                let e = eq[cell] + sf * (eq[cell + half] - eq[cell]);
+                let hv = h[cell] + sf * (h[cell + half] - h[cell]) + dh;
+                let uv = u[cell] + sf * (u[cell + half] - u[cell]) + du;
+                acc = acc + e * hv * uv;
+            }
+            evals.push(acc + ipre * (FqExt::ONE - sf) * msum);
+        }
+        if let Some(m) = mask.as_deref_mut() {
+            for (e, v) in evals.iter_mut().zip(m.round_plain(round, &pts)) {
+                *e = *e + v;
+            }
+        }
+        for &e in &evals {
+            tr.absorb_fq4(e);
+        }
+        let r = tr.challenge_fq4();
+        if let Some(m) = mask.as_deref_mut() {
+            m.fold(round, r);
+        }
+        r_point.push(r);
+        for t in [&mut eq, &mut h, &mut u] {
+            for i in 0..half {
+                t[i] = t[i] + r * (t[i + half] - t[i]);
+            }
+            t.truncate(half);
+        }
+        zpre = zpre * r * (FqExt::ONE - r);
+        ipre = ipre * (FqExt::ONE - r);
+        rounds.push(evals);
+    }
+
+    let z1 = r_point[nv - 1];
+    let h_dot = h[0] + zpre * sigma_h.eval(z1);
+    let u_dot = u[0] + zpre * sigma_u;
+    let main = eq[0] * h_dot * u_dot;
+    let wdeg = mdeg.max(1).max(mask.as_deref().map_or(0, |m| m.deg()));
+    let wpts: Vec<u64> = (0..=wdeg as u64).collect();
+    let mut evals: Vec<FqExt> = wpts
+        .iter()
+        .map(|&s| {
+            let sf = FqExt::from_u64(s);
+            (FqExt::ONE - sf) * main + ipre * rmask.eval(sf)
+        })
+        .collect();
+    if let Some(m) = mask.as_deref_mut() {
+        for (e, v) in evals.iter_mut().zip(m.round_plain(nv, &wpts)) {
+            *e = *e + v;
+        }
+    }
+    for &e in &evals {
+        tr.absorb_fq4(e);
+    }
+    let c = tr.challenge_fq4();
+    if let Some(m) = mask.as_deref_mut() {
+        m.fold(nv, c);
+    }
+    r_point.push(c);
+    rounds.push(evals);
+
+    (SumcheckProof { rounds }, r_point, h_dot, u_dot, rmask.eval(c))
 }
 
 pub fn prove_eq_bitcheck(
@@ -224,19 +381,41 @@ pub fn verify_eq_bitcheck(
 pub fn prove_product2(
     a_base: &[Fq],
     mut b: Vec<FqExt>,
+    sigma: LinMask,
+    rmask: ClaimMask,
     mut mask: Option<&mut Masker>,
     tr: &mut Transcript,
-) -> (SumcheckProof, Vec<FqExt>) {
+) -> (SumcheckProof, Vec<FqExt>, FqExt, FqExt) {
     let nv = b.len().trailing_zeros() as usize;
     assert_eq!(a_base.len(), b.len());
-    let mut rounds = Vec::with_capacity(nv);
-    let mut r_point = Vec::with_capacity(nv);
+    let msum = rmask.total();
+    let mut rounds = Vec::with_capacity(nv + 1);
+    let mut r_point = Vec::with_capacity(nv + 1);
     let mut a_ext: Vec<FqExt> = Vec::new();
+    let mut zpre = FqExt::ONE;
+    let mut ipre = FqExt::ONE;
+    let mut b_final = FqExt::ZERO;
 
     for j in 0..nv {
         let half = 1usize << (nv - 1 - j);
-        let (mut g0, mut g2) = (FqExt::ZERO, FqExt::ZERO);
-        if j == 0 {
+        let last_cube = j + 1 == nv;
+        let pts: &[u64] = if last_cube { &[0, 2, 3, 4] } else { &[0, 2] };
+        let mut evals = vec![FqExt::ZERO; pts.len()];
+        if last_cube {
+            let (alo, ahi) = if j == 0 {
+                (FqExt::from_fq(a_base[0]), FqExt::from_fq(a_base[1]))
+            } else {
+                (a_ext[0], a_ext[1])
+            };
+            for (k, &s) in pts.iter().enumerate() {
+                let sf = FqExt::from_u64(s);
+                let zc = zpre * sf * (FqExt::ONE - sf) * sigma.eval(sf);
+                let av = alo + sf * (ahi - alo) + zc;
+                let bv = b[0] + sf * (b[1] - b[0]);
+                evals[k] = av * bv;
+            }
+        } else if j == 0 {
+            let (mut g0, mut g2) = (FqExt::ZERO, FqExt::ZERO);
             for cell in 0..half {
                 let alo = a_base[cell];
                 let ahi = a_base[cell + half];
@@ -247,25 +426,33 @@ pub fn prove_product2(
                 let b2 = bhi + (bhi - blo);
                 g2 = g2 + a2 * b2;
             }
+            evals[0] = g0;
+            evals[1] = g2;
         } else {
+            let (mut g0, mut g2) = (FqExt::ZERO, FqExt::ZERO);
             for cell in 0..half {
                 let alo = a_ext[cell];
                 let ahi = a_ext[cell + half];
                 let blo = b[cell];
                 let bhi = b[cell + half];
                 g0 = g0 + alo * blo;
-                let a2 = ahi + (ahi - alo);
-                let b2 = bhi + (bhi - blo);
-                g2 = g2 + a2 * b2;
+                g2 = g2 + (ahi + (ahi - alo)) * (bhi + (bhi - blo));
             }
+            evals[0] = g0;
+            evals[1] = g2;
+        }
+        for (k, &s) in pts.iter().enumerate() {
+            let sf = FqExt::from_u64(s);
+            evals[k] = evals[k] + ipre * (FqExt::ONE - sf) * msum;
         }
         if let Some(m) = mask.as_deref_mut() {
-            let v = m.round_plain(j, &[0, 2]);
-            g0 = g0 + v[0];
-            g2 = g2 + v[1];
+            for (e, v) in evals.iter_mut().zip(m.round_plain(j, pts)) {
+                *e = *e + v;
+            }
         }
-        tr.absorb_fq4(g0);
-        tr.absorb_fq4(g2);
+        for &e in &evals {
+            tr.absorb_fq4(e);
+        }
         let r = tr.challenge_fq4();
         if let Some(m) = mask.as_deref_mut() {
             m.fold(j, r);
@@ -288,9 +475,39 @@ pub fn prove_product2(
             b[i] = b[i] + r * (b[i + half] - b[i]);
         }
         b.truncate(half);
-        rounds.push(vec![g0, g2]);
+        zpre = zpre * r * (FqExt::ONE - r);
+        ipre = ipre * (FqExt::ONE - r);
+        b_final = b[0];
+        rounds.push(evals);
     }
-    (SumcheckProof { rounds }, r_point)
+
+    let t_dot = a_ext[0] + zpre * sigma.eval(r_point[nv - 1]);
+    let main = b_final * t_dot;
+    let wdeg = rmask.deg().max(1).max(mask.as_deref().map_or(0, |m| m.deg()));
+    let wpts: Vec<u64> = std::iter::once(0).chain(2..=wdeg as u64).collect();
+    let mut evals: Vec<FqExt> = wpts
+        .iter()
+        .map(|&s| {
+            let sf = FqExt::from_u64(s);
+            (FqExt::ONE - sf) * main + ipre * rmask.eval(sf)
+        })
+        .collect();
+    if let Some(m) = mask.as_deref_mut() {
+        for (e, v) in evals.iter_mut().zip(m.round_plain(nv, &wpts)) {
+            *e = *e + v;
+        }
+    }
+    for &e in &evals {
+        tr.absorb_fq4(e);
+    }
+    let c = tr.challenge_fq4();
+    if let Some(m) = mask.as_deref_mut() {
+        m.fold(nv, c);
+    }
+    r_point.push(c);
+    rounds.push(evals);
+
+    (SumcheckProof { rounds }, r_point, t_dot, rmask.eval(c))
 }
 
 pub fn prove_product2_factored(
@@ -407,26 +624,29 @@ pub fn prove_product2_factored(
 
 pub fn verify_product2(
     claim: FqExt,
-    nv: usize,
+    degs: &[usize],
     proof: &SumcheckProof,
     tr: &mut Transcript,
 ) -> Option<(FqExt, Vec<FqExt>)> {
-    if proof.rounds.len() != nv {
+    if proof.rounds.len() != degs.len() {
         return None;
     }
     let mut c = claim;
-    let mut r_point = Vec::with_capacity(nv);
-    for evals in &proof.rounds {
-        if evals.len() != 2 {
+    let mut r_point = Vec::with_capacity(degs.len());
+    for (evals, &d) in proof.rounds.iter().zip(degs) {
+        if evals.len() != d {
             return None;
         }
-        let (g0, g2) = (evals[0], evals[1]);
-        let g1 = c - g0;
-        tr.absorb_fq4(g0);
-        tr.absorb_fq4(g2);
+        for &e in evals {
+            tr.absorb_fq4(e);
+        }
         let r = tr.challenge_fq4();
         r_point.push(r);
-        c = lagrange_eval(&[g0, g1, g2], r);
+        let mut pts = Vec::with_capacity(d + 1);
+        pts.push(evals[0]);
+        pts.push(c - evals[0]);
+        pts.extend_from_slice(&evals[1..]);
+        c = lagrange_eval(&pts, r);
     }
     Some((c, r_point))
 }
@@ -438,15 +658,18 @@ pub fn prove_batched_w(
     apow: &[FqExt],
     tau0: &[FqExt],
     lambda: FqExt,
+    sigma_w: LinMask,
+    rmask: ClaimMask,
     scratch: &mut Vec<FqExt>,
     mut mask: Option<&mut Masker>,
     tr: &mut Transcript,
-) -> (SumcheckProof, Vec<FqExt>, FqExt) {
+) -> (SumcheckProof, Vec<FqExt>, FqExt, FqExt) {
     let nv_w = tau0.len();
     let nv_k = lg.len().trailing_zeros() as usize;
     let s_len = apow.len();
     assert_eq!(zw.len(), 1 << nv_w);
     assert_eq!(lg.len() * s_len, 1 << nv_w);
+    assert!(nv_k >= 1 && s_len >= 2, "prove_batched_w requires nv_k >= 1 and s_len >= 2");
 
     let mid = nv_k;
     let eb = eq_table(&tau0[mid..]);
@@ -467,9 +690,57 @@ pub fn prove_batched_w(
     let mut rounds = Vec::with_capacity(nv_w);
     let mut b: Vec<FqExt> = Vec::new();
     let mut eq_prefix = FqExt::ONE;
+    let mut zpre = FqExt::ONE;
+    let mut ipre = FqExt::ONE;
+    let msum = rmask.total();
+    let mut main_final = FqExt::ZERO;
+    let mut w_dot = FqExt::ZERO;
 
     for round in 0..nv_w {
         let half = 1usize << (nv_w - 1 - round);
+        if round + 1 == nv_w {
+            debug_assert_eq!(half, 1);
+            debug_assert!(round >= nv_k, "the final round must be in phase B (s_len >= 2)");
+            let (w0, dw) = (w[0], w[1] - w[0]);
+            let (b0, db) = (b[0], b[1] - b[0]);
+            let t = tau0[round];
+            let slope = t + t - FqExt::ONE;
+            let eq1_0 = FqExt::ONE - t;
+            let pts: [u64; 7] = [0, 2, 3, 4, 5, 6, 7];
+            let mut evals: Vec<FqExt> = pts
+                .iter()
+                .map(|&s| {
+                    let sf = FqExt::from_u64(s);
+                    let wv = w0 + sf * dw + zpre * sf * (FqExt::ONE - sf) * sigma_w.eval(sf);
+                    let bv = b0 + sf * db;
+                    let q3 = wv * (wv - FqExt::ONE);
+                    let eq1 = eq1_0 + sf * slope;
+                    lambda * (bv * wv)
+                        + eq_prefix * eq1 * q3
+                        + ipre * (FqExt::ONE - sf) * msum
+                })
+                .collect();
+            if let Some(m) = mask.as_deref_mut() {
+                for (e, v) in evals.iter_mut().zip(m.round_plain(round, &pts)) {
+                    *e = *e + v;
+                }
+            }
+            for &e in &evals {
+                tr.absorb_fq4(e);
+            }
+            let r = tr.challenge_fq4();
+            if let Some(m) = mask.as_deref_mut() {
+                m.fold(round, r);
+            }
+            r_point.push(r);
+            zpre = zpre * r * (FqExt::ONE - r);
+            ipre = ipre * (FqExt::ONE - r);
+            w_dot = w0 + r * dw + zpre * sigma_w.eval(r);
+            let eq_full = eq_prefix * (t * r + (FqExt::ONE - t) * (FqExt::ONE - r));
+            main_final = lambda * (b0 + r * db) * w_dot + eq_full * w_dot * (w_dot - FqExt::ONE);
+            rounds.push(evals);
+            break;
+        }
         let eqsuf_mat: Vec<FqExt>;
         let ea: &[FqExt] = if round < mid {
             &sa[mid - 1 - round]
@@ -557,9 +828,10 @@ pub fn prove_batched_w(
         let slope = t + t - FqExt::ONE;
         let eq1_2 = eq1_0 + slope + slope;
         let eq1_3 = eq1_2 + slope;
-        let mut g0 = lambda * gf2_0 + eq_prefix * eq1_0 * q3_0;
-        let mut g2 = lambda * gf2_2 + eq_prefix * eq1_2 * q3_2;
-        let mut g3 = lambda * gf2_3 + eq_prefix * eq1_3 * q3_3;
+        let ind = ipre * msum;
+        let mut g0 = lambda * gf2_0 + eq_prefix * eq1_0 * q3_0 + ind;
+        let mut g2 = lambda * gf2_2 + eq_prefix * eq1_2 * q3_2 - ind;
+        let mut g3 = lambda * gf2_3 + eq_prefix * eq1_3 * q3_3 - (ind + ind);
         if let Some(m) = mask.as_deref_mut() {
             let v = m.round_plain(round, &[0, 2, 3]);
             g0 = g0 + v[0];
@@ -575,6 +847,8 @@ pub fn prove_batched_w(
         }
         r_point.push(r);
         eq_prefix = eq_prefix * (t * r + (FqExt::ONE - t) * (FqExt::ONE - r));
+        zpre = zpre * r * (FqExt::ONE - r);
+        ipre = ipre * (FqExt::ONE - r);
 
         if round == 0 {
             if nv_k >= 2 {
@@ -618,33 +892,59 @@ pub fn prove_batched_w(
         }
         rounds.push(vec![g0, g2, g3]);
     }
-    let open_w = w[0];
-    (SumcheckProof { rounds }, r_point, open_w)
+    let wdeg = rmask.deg().max(1).max(mask.as_deref().map_or(0, |m| m.deg()));
+    let wpts: Vec<u64> = std::iter::once(0).chain(2..=wdeg as u64).collect();
+    let mut evals: Vec<FqExt> = wpts
+        .iter()
+        .map(|&s| {
+            let sf = FqExt::from_u64(s);
+            (FqExt::ONE - sf) * main_final + ipre * rmask.eval(sf)
+        })
+        .collect();
+    if let Some(m) = mask.as_deref_mut() {
+        for (e, v) in evals.iter_mut().zip(m.round_plain(nv_w, &wpts)) {
+            *e = *e + v;
+        }
+    }
+    for &e in &evals {
+        tr.absorb_fq4(e);
+    }
+    let c = tr.challenge_fq4();
+    if let Some(m) = mask.as_deref_mut() {
+        m.fold(nv_w, c);
+    }
+    r_point.push(c);
+    rounds.push(evals);
+
+    (SumcheckProof { rounds }, r_point, w_dot, rmask.eval(c))
 }
 
 pub fn verify_batched_w(
     claim: FqExt,
-    nv_w: usize,
+    degs: &[usize],
     proof: &SumcheckProof,
     tr: &mut Transcript,
 ) -> Option<(FqExt, Vec<FqExt>)> {
-    if proof.rounds.len() != nv_w {
+    if proof.rounds.len() != degs.len() {
         return None;
     }
     let mut c = claim;
-    let mut r_point = Vec::with_capacity(nv_w);
-    for evals in &proof.rounds {
-        if evals.len() != 3 {
+    let mut r_point = Vec::with_capacity(degs.len());
+    for (evals, &d) in proof.rounds.iter().zip(degs) {
+        if evals.len() != d {
             return None;
         }
-        let (g0, g2, g3) = (evals[0], evals[1], evals[2]);
-        let g1 = c - g0;
-        tr.absorb_fq4(g0);
-        tr.absorb_fq4(g2);
-        tr.absorb_fq4(g3);
+        let g1 = c - evals[0];
+        for &e in evals {
+            tr.absorb_fq4(e);
+        }
         let r = tr.challenge_fq4();
         r_point.push(r);
-        c = lagrange_eval(&[g0, g1, g2, g3], r);
+        let mut pts = Vec::with_capacity(d + 1);
+        pts.push(evals[0]);
+        pts.push(g1);
+        pts.extend_from_slice(&evals[1..]);
+        c = lagrange_eval(&pts, r);
     }
     Some((c, r_point))
 }
@@ -776,12 +1076,15 @@ mod tests {
         let apow: Vec<FqExt> = (0..s_len).map(|_| rng.next_fq4()).collect();
         let b: Vec<FqExt> = (0..total).map(|i| lg[i / s_len] * apow[i % s_len]).collect();
 
+        let zr = [FqExt::ZERO; 3];
         let mut tr1 = Transcript::new("p2f");
-        let (p1, r1) = prove_product2(&a, b, None, &mut tr1);
+        let (p1, r1, _, _) =
+            prove_product2(&a, b, LinMask([FqExt::ZERO; 2]), ClaimMask { coef: &zr }, None, &mut tr1);
         let mut tr2 = Transcript::new("p2f");
         let (p2, r2, _) = prove_product2_factored(&a_p, lg, &apow, &mut Vec::new(), &mut tr2);
-        assert_eq!(r1, r2);
-        assert_eq!(p1.rounds, p2.rounds);
+        let nvt = nv_k + s_len.trailing_zeros() as usize;
+        assert_eq!(r1[..nvt - 1], r2[..nvt - 1]);
+        assert_eq!(p1.rounds[..nvt - 1], p2.rounds[..nvt - 1]);
     }
 
     #[test]
@@ -794,32 +1097,49 @@ mod tests {
         let s_len = 1 << nv_l;
         let total = 1 << nv_w;
         let w_bits: Vec<u8> = (0..total).map(|_| rng.next_bool() as u8).collect();
-        let w_fq4: Vec<FqExt> =
-            w_bits.iter().map(|&b| FqExt::from_u64(b as u64)).collect();
+        let w_fq4: Vec<FqExt> = w_bits.iter().map(|&b| FqExt::from_u64(b as u64)).collect();
         let zw = PackedBits::from_bits(&w_bits, total);
         let lg: Vec<FqExt> = (0..1 << nv_k).map(|_| rng.next_fq4()).collect();
         let apow: Vec<FqExt> = (0..s_len).map(|_| rng.next_fq4()).collect();
         let tau0: Vec<FqExt> = (0..nv_w).map(|_| rng.next_fq4()).collect();
         let lambda = rng.next_fq4();
+        let sigma_w = LinMask([rng.next_fq4(), rng.next_fq4()]);
+        let ncoef: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
+        let nmask = ClaimMask { coef: &ncoef };
+        let nsum = nmask.total();
 
         let mut claim2 = FqExt::ZERO;
         for cell in 0..total {
             claim2 = claim2 + lg[cell / s_len] * apow[cell % s_len] * w_fq4[cell];
         }
+        let claim0 = lambda * claim2 + nsum;
 
         let mut tr_p = Transcript::new("bw");
-        let (proof, r, open_w) =
-            prove_batched_w(&zw, lg.clone(), &apow, &tau0, lambda, &mut Vec::new(), None, &mut tr_p);
+        let (proof, r, open_w, n_at_c) = prove_batched_w(
+            &zw,
+            lg.clone(),
+            &apow,
+            &tau0,
+            lambda,
+            sigma_w,
+            nmask,
+            &mut Vec::new(),
+            None,
+            &mut tr_p,
+        );
 
         let mut wb = w_fq4.clone();
         let mut lgb = lg.clone();
         let mut bb: Vec<FqExt> = Vec::new();
         let mut tr_sim = Transcript::new("bw");
         let mut sim_r: Vec<FqExt> = Vec::new();
-        let mut claim_sim = lambda * claim2;
+        let mut claim_sim = claim0;
         let mut eqpre = FqExt::ONE;
+        let mut zpre = FqExt::ONE;
+        let mut ipre = FqExt::ONE;
         for round in 0..nv_w {
             let half = 1 << (nv_w - 1 - round);
+            let last = round + 1 == nv_w;
             let t = tau0[round];
             let eqrem = |cell: usize| -> FqExt {
                 let rem = nv_w - 1 - round;
@@ -834,10 +1154,12 @@ mod tests {
             let gx = |x: FqExt, wb: &[FqExt], lgb: &[FqExt], bb: &[FqExt]| -> FqExt {
                 let mut g = FqExt::ZERO;
                 let eq1x = t * x + (FqExt::ONE - t) * (FqExt::ONE - x);
+                let zc =
+                    if last { zpre * x * (FqExt::ONE - x) * sigma_w.eval(x) } else { FqExt::ZERO };
                 for cell in 0..half {
                     let wlo = wb[cell];
                     let whi = wb[cell + half];
-                    let wx = wlo + x * (whi - wlo);
+                    let wx = wlo + x * (whi - wlo) + zc;
                     let f2 = if round < nv_k {
                         let hk = lgb.len() / 2;
                         let k = cell / s_len;
@@ -850,27 +1172,29 @@ mod tests {
                     };
                     g = g + lambda * f2 + eqpre * eq1x * eqrem(cell) * wx * (wx - FqExt::ONE);
                 }
-                g
+                g + ipre * (FqExt::ONE - x) * nsum
             };
-            let bg0 = gx(FqExt::ZERO, &wb, &lgb, &bb);
-            let bg1 = gx(FqExt::ONE, &wb, &lgb, &bb);
-            let bg2 = gx(FqExt::from_u64(2), &wb, &lgb, &bb);
-            let bg3 = gx(FqExt::from_u64(3), &wb, &lgb, &bb);
-            assert_eq!(bg0 + bg1, claim_sim, "round {round} g(0)+g(1) != claim");
-            assert_eq!(proof.rounds[round][0], bg0, "round {round} g0");
-            assert_eq!(proof.rounds[round][1], bg2, "round {round} g2");
-            assert_eq!(proof.rounds[round][2], bg3, "round {round} g3");
-            tr_sim.absorb_fq4(bg0);
-            tr_sim.absorb_fq4(bg2);
-            tr_sim.absorb_fq4(bg3);
+            let nodes: Vec<u64> =
+                if last { (0..=7).collect() } else { vec![0, 1, 2, 3] };
+            let all: Vec<FqExt> =
+                nodes.iter().map(|&s| gx(FqExt::from_u64(s), &wb, &lgb, &bb)).collect();
+            assert_eq!(all[0] + all[1], claim_sim, "round {round} g(0)+g(1) != claim");
+            let sent: Vec<FqExt> =
+                all.iter().enumerate().filter(|(i, _)| *i != 1).map(|(_, &v)| v).collect();
+            assert_eq!(proof.rounds[round], sent, "round polynomial for round {round}");
+            for &e in &sent {
+                tr_sim.absorb_fq4(e);
+            }
             let r = tr_sim.challenge_fq4();
             sim_r.push(r);
             eqpre = eqpre * (t * r + (FqExt::ONE - t) * (FqExt::ONE - r));
-            claim_sim = lagrange_eval(&[bg0, bg1, bg2, bg3], r);
+            claim_sim = lagrange_eval(&all, r);
             for i in 0..half {
                 wb[i] = wb[i] + r * (wb[i + half] - wb[i]);
             }
             wb.truncate(half);
+            zpre = zpre * r * (FqExt::ONE - r);
+            ipre = ipre * (FqExt::ONE - r);
             if round < nv_k {
                 let hk = lgb.len() / 2;
                 for k in 0..hk {
@@ -889,20 +1213,167 @@ mod tests {
             }
         }
 
-        let sim_final =
-            lambda * bb[0] * wb[0] + eq_eval(&tau0, &sim_r) * wb[0] * (wb[0] - FqExt::ONE);
+        let w_dot = wb[0] + zpre * sigma_w.eval(sim_r[nv_w - 1]);
+        let main_final =
+            lambda * bb[0] * w_dot + eq_eval(&tau0, &sim_r) * w_dot * (w_dot - FqExt::ONE);
+        let wall: Vec<FqExt> = [0u64, 1, 2]
+            .iter()
+            .map(|&s| {
+                let x = FqExt::from_u64(s);
+                (FqExt::ONE - x) * main_final + ipre * nmask.eval(x)
+            })
+            .collect();
+        assert_eq!(wall[0] + wall[1], claim_sim, "w round: g(0)+g(1) != claim");
+        let wsent: Vec<FqExt> = vec![wall[0], wall[2]];
+        assert_eq!(proof.rounds[nv_w], wsent, "round polynomial of the w round");
+        for &e in &wsent {
+            tr_sim.absorb_fq4(e);
+        }
+        let c = tr_sim.challenge_fq4();
+        sim_r.push(c);
+        let sim_final = lagrange_eval(&wall, c);
 
+        let degs = round_degs(nv_w, 3, 7, 2);
         let mut tr_v = Transcript::new("bw");
-        let (e_b, r_v) = verify_batched_w(lambda * claim2, nv_w, &proof, &mut tr_v).expect("v");
+        let (e_b, r_v) = verify_batched_w(claim0, &degs, &proof, &mut tr_v).expect("v");
         assert_eq!(r, r_v);
         assert_eq!(sim_r, r_v);
         assert_eq!(e_b, sim_final, "e_b vs sim-final (verify folding)");
-        assert_eq!(open_w, wb[0], "open_w");
-        let w_at = mle_eval(&w_fq4, &r_v);
+        assert_eq!(open_w, w_dot, "open_w must be the masked Ẇ(r_w)");
+        assert_ne!(open_w, wb[0], "when σ_W != 0, Ẇ(r_w) must not equal W̃(r_w)");
+        assert_eq!(n_at_c, nmask.eval(c), "N(c) is wrong");
+        let ind = sim_r[..nv_w].iter().fold(FqExt::ONE, |a, &x| a * (FqExt::ONE - x));
+        assert_eq!(
+            e_b,
+            (FqExt::ONE - c) * main_final + ind * n_at_c,
+            "the closing identity of Libra step (f) does not hold"
+        );
+        let w_at = mle_eval(&w_fq4, &r_v[..nv_w]);
         let lg_at = mle_eval(&lg, &r_v[..nv_k]);
-        let apow_at = mle_eval(&apow, &r_v[nv_k..]);
+        let apow_at = mle_eval(&apow, &r_v[nv_k..nv_w]);
         assert_eq!(w_at, wb[0], "W̃ via mle vs fold");
         assert_eq!(bb[0], lg_at * apow_at, "b̃ vs lg_at·apow_at");
+    }
+
+    #[test]
+    fn bilinear_zk_keeps_the_claim_and_masks_the_finals() {
+        use crate::mle::mle_eval;
+        let mut rng = SimpleRng::new(0x0BEE_51);
+        let nv = 5usize;
+        let n = 1usize << nv;
+        let eq: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+        let h: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+        let u: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+        let claim = (0..n).fold(FqExt::ZERO, |a, i| a + eq[i] * h[i] * u[i]);
+
+        let zr = [FqExt::ZERO; 3];
+        let rb: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
+        let run = |sh: LinMask, su: FqExt, rc: &[FqExt; 3]| {
+            let mut tr = Transcript::new("bz");
+            let (p, r, hf, uf, rv) = prove_bilinear_zk(
+                eq.clone(),
+                h.clone(),
+                u.clone(),
+                sh,
+                su,
+                ClaimMask { coef: rc },
+                None,
+                &mut tr,
+            );
+            (p, r, hf, uf, rv)
+        };
+        let (p0, r0, h0, u0, _) = run(LinMask([FqExt::ZERO; 2]), FqExt::ZERO, &zr);
+        let sh = LinMask([rng.next_fq4(), rng.next_fq4()]);
+        let su = rng.next_fq4();
+        let (p1, r1, h1, u1, rb_at_c) = run(sh, su, &rb);
+        let msum = rb[0] + (rb[0] + rb[1] + rb[2]);
+
+        assert_eq!(p0.rounds[0][0] + p0.rounds[0][1], claim, "σ changed the claim");
+        assert_eq!(
+            p1.rounds[0][0] + p1.rounds[0][1],
+            claim + msum,
+            "the claim is not shifted by exactly ΣR_B"
+        );
+        assert_eq!(p1.rounds.len(), nv + 1);
+        assert!(p1.rounds[..nv - 1].iter().all(|x| x.len() == 4));
+        assert_eq!(p1.rounds[nv - 1].len(), 7);
+        assert_eq!(p1.rounds[nv].len(), 3, "w round: deg 2 => send 3 values (node 1 is not skipped)");
+
+        let rc = &r1[..nv];
+        let z = rc.iter().fold(FqExt::ONE, |a, &x| a * x * (FqExt::ONE - x));
+        assert_eq!(h1, mle_eval(&h, rc) + z * sh.eval(rc[nv - 1]), "Ḣ(r) is not H̃(r) + Z(r)R_H(z₁)");
+        assert_eq!(u1, mle_eval(&u, rc) + z * su, "U̇(r) is not Ũ(r) + Z(r)σ_U");
+        assert_eq!(h0, mle_eval(&h, &r0[..nv]), "with σ=0 it must fall back to the unmasked value");
+        assert_eq!(u0, mle_eval(&u, &r0[..nv]));
+        assert_ne!(h0, h1, "R_H had no effect");
+        assert_ne!(u0, u1, "σ_U had no effect");
+
+        let degs = round_degs(nv, 3, 6, 2);
+        let mut tr_v = Transcript::new("bz");
+        let (e, rv) = verify_degs(claim + msum, &degs, &p1, &mut tr_v).expect("verify");
+        assert_eq!(rv, r1);
+        let c = r1[nv];
+        let ind = rc.iter().fold(FqExt::ONE, |a, &x| a * (FqExt::ONE - x));
+        assert_eq!(
+            e,
+            (FqExt::ONE - c) * mle_eval(&eq, rc) * h1 * u1 + ind * rb_at_c,
+            "the closing identity of Libra step (f) does not hold"
+        );
+        let mut tr_w = Transcript::new("bz");
+        assert!(verify_degs(claim, &degs, &p1, &mut tr_w).is_none(), "an unmasked claim was accepted");
+    }
+
+    #[test]
+    fn product2_sigma_shifts_claim_and_final_only() {
+        use crate::mle::mle_eval;
+        let mut rng = SimpleRng::new(0x0BEE_52);
+        let nv = 6usize;
+        let n = 1usize << nv;
+        let a: Vec<Fq> = (0..n).map(|_| Fq::new(rng.next_u64() % Q)).collect();
+        let b: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
+        let base = (0..n).fold(FqExt::ZERO, |s, i| s + FqExt::from_fq(a[i]) * b[i]);
+        let sigma = LinMask([rng.next_fq4(), rng.next_fq4()]);
+
+        let rq: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
+        let msum = rq[0] + (rq[0] + rq[1] + rq[2]);
+
+        let mut tr = Transcript::new("p2s");
+        let (p, r, t_dot, rq_at_c) =
+            prove_product2(&a, b.clone(), sigma, ClaimMask { coef: &rq }, None, &mut tr);
+        let claim = base + msum;
+
+        let degs = round_degs(nv, 2, 4, 2);
+        let mut tr_v = Transcript::new("p2s");
+        let (e, rv) = verify_product2(claim, &degs, &p, &mut tr_v).expect("verify");
+        assert_eq!(rv, r);
+        let rc = &r[..nv];
+        let lifted: Vec<FqExt> = a.iter().map(|&x| FqExt::from_fq(x)).collect();
+        let z = rc.iter().fold(FqExt::ONE, |x, &y| x * y * (FqExt::ONE - y));
+        let ind = rc.iter().fold(FqExt::ONE, |x, &y| x * (FqExt::ONE - y));
+        assert_eq!(
+            t_dot,
+            mle_eval(&lifted, rc) + z * sigma.eval(rc[nv - 1]),
+            "Ṫ(r) is not T̃(r) + Z(r)R_T(z₁)"
+        );
+        assert_ne!(t_dot, mle_eval(&lifted, rc), "σ_T had no effect");
+        let c = r[nv];
+        assert_eq!(
+            e,
+            (FqExt::ONE - c) * t_dot * mle_eval(&b, rc) + ind * rq_at_c,
+            "the closing identity does not hold"
+        );
+        let mut tr_w = Transcript::new("p2s");
+        let (ew, rw) = verify_product2(base, &degs, &p, &mut tr_w).expect("well-formed");
+        let rwc = &rw[..nv];
+        let zw2 = rwc.iter().fold(FqExt::ONE, |x, &y| x * y * (FqExt::ONE - y));
+        let indw = rwc.iter().fold(FqExt::ONE, |x, &y| x * (FqExt::ONE - y));
+        let tw = mle_eval(&lifted, rwc) + zw2 * sigma.eval(rwc[nv - 1]);
+        assert_ne!(
+            ew,
+            (FqExt::ONE - rw[nv]) * tw * mle_eval(&b, rwc)
+                + indw * ClaimMask { coef: &rq }.eval(rw[nv]),
+            "an unmasked claim satisfied the closing identity"
+        );
     }
 
     fn batched_w_reference(
@@ -911,6 +1382,8 @@ mod tests {
         apow: &[FqExt],
         tau0: &[FqExt],
         lambda: FqExt,
+        sigma_w: LinMask,
+        rmask: ClaimMask,
         tr: &mut Transcript,
     ) -> (SumcheckProof, Vec<FqExt>, FqExt) {
         let nv_w = tau0.len();
@@ -921,8 +1394,13 @@ mod tests {
         let mut rounds = Vec::with_capacity(nv_w);
         let mut r_point = Vec::with_capacity(nv_w);
         let mut eqpre = FqExt::ONE;
+        let mut zpre = FqExt::ONE;
+        let mut ipre = FqExt::ONE;
+        let msum = rmask.total();
+        let mut main_final = FqExt::ZERO;
         for round in 0..nv_w {
             let half = 1usize << (nv_w - 1 - round);
+            let last = round + 1 == nv_w;
             let t = tau0[round];
             let eqrem = |cell: usize| -> FqExt {
                 let rem = nv_w - 1 - round;
@@ -933,9 +1411,11 @@ mod tests {
             };
             let gx = |x: FqExt, w: &[FqExt], lg: &[FqExt], b: &[FqExt]| -> FqExt {
                 let eq1x = t * x + (FqExt::ONE - t) * (FqExt::ONE - x);
+                let zc =
+                    if last { zpre * x * (FqExt::ONE - x) * sigma_w.eval(x) } else { FqExt::ZERO };
                 (0..half).fold(FqExt::ZERO, |g, cell| {
                     let (wlo, whi) = (w[cell], w[cell + half]);
-                    let wx = wlo + x * (whi - wlo);
+                    let wx = wlo + x * (whi - wlo) + zc;
                     let bx = if round < nv_k {
                         let hk = lg.len() / 2;
                         let (k, l) = (cell / s_len, cell % s_len);
@@ -944,16 +1424,14 @@ mod tests {
                         b[cell] + x * (b[cell + half] - b[cell])
                     };
                     g + lambda * bx * wx + eqpre * eq1x * eqrem(cell) * wx * (wx - FqExt::ONE)
-                })
+                }) + ipre * (FqExt::ONE - x) * msum
             };
-            let (g0, g2, g3) = (
-                gx(FqExt::ZERO, &w, &lg, &b),
-                gx(FqExt::from_u64(2), &w, &lg, &b),
-                gx(FqExt::from_u64(3), &w, &lg, &b),
-            );
-            tr.absorb_fq4(g0);
-            tr.absorb_fq4(g2);
-            tr.absorb_fq4(g3);
+            let pts: &[u64] = if last { &[0, 2, 3, 4, 5, 6, 7] } else { &[0, 2, 3] };
+            let evals: Vec<FqExt> =
+                pts.iter().map(|&s| gx(FqExt::from_u64(s), &w, &lg, &b)).collect();
+            for &e in &evals {
+                tr.absorb_fq4(e);
+            }
             let r = tr.challenge_fq4();
             r_point.push(r);
             eqpre = eqpre * (t * r + (FqExt::ONE - t) * (FqExt::ONE - r));
@@ -961,6 +1439,8 @@ mod tests {
                 w[i] = w[i] + r * (w[i + half] - w[i]);
             }
             w.truncate(half);
+            zpre = zpre * r * (FqExt::ONE - r);
+            ipre = ipre * (FqExt::ONE - r);
             if round < nv_k {
                 let hk = lg.len() / 2;
                 for k in 0..hk {
@@ -977,9 +1457,28 @@ mod tests {
                 }
                 b.truncate(hb);
             }
-            rounds.push(vec![g0, g2, g3]);
+            if last {
+                let wd = w[0] + zpre * sigma_w.eval(r_point[nv_w - 1]);
+                main_final = lambda * b[0] * wd + eqpre * wd * (wd - FqExt::ONE);
+            }
+            rounds.push(evals);
         }
-        (SumcheckProof { rounds }, r_point, w[0])
+        let wall: Vec<FqExt> = [0u64, 2]
+            .iter()
+            .map(|&s| {
+                let x = FqExt::from_u64(s);
+                (FqExt::ONE - x) * main_final + ipre * rmask.eval(x)
+            })
+            .collect();
+        for &e in &wall {
+            tr.absorb_fq4(e);
+        }
+        let c = tr.challenge_fq4();
+        r_point.push(c);
+        rounds.push(wall);
+        let _ = c;
+        let z1 = r_point[nv_w - 1];
+        (SumcheckProof { rounds }, r_point, w[0] + zpre * sigma_w.eval(z1))
     }
 
     #[test]
@@ -994,12 +1493,25 @@ mod tests {
         let apow: Vec<FqExt> = (0..s_len).map(|_| rng.next_fq4()).collect();
         let tau0: Vec<FqExt> = (0..nv_k + nv_l).map(|_| rng.next_fq4()).collect();
         let lambda = rng.next_fq4();
+        let sigma_w = LinMask([rng.next_fq4(), rng.next_fq4()]);
 
+        let ncoef: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
+        let nmask = ClaimMask { coef: &ncoef };
         let mut t1 = Transcript::new("ref");
-        let (p1, r1, o1) =
-            prove_batched_w(&zw, lg.clone(), &apow, &tau0, lambda, &mut Vec::new(), None, &mut t1);
+        let (p1, r1, o1, _) = prove_batched_w(
+            &zw,
+            lg.clone(),
+            &apow,
+            &tau0,
+            lambda,
+            sigma_w,
+            nmask,
+            &mut Vec::new(),
+            None,
+            &mut t1,
+        );
         let mut t2 = Transcript::new("ref");
-        let (p2, r2, o2) = batched_w_reference(&w, lg, &apow, &tau0, lambda, &mut t2);
+        let (p2, r2, o2) = batched_w_reference(&w, lg, &apow, &tau0, lambda, sigma_w, nmask, &mut t2);
         assert_eq!(p1.rounds, p2.rounds);
         assert_eq!(r1, r2);
         assert_eq!(o1, o2);
@@ -1022,19 +1534,32 @@ mod tests {
         let claim2 = (0..total)
             .fold(FqExt::ZERO, |a, c| a + lg[c / s_len] * apow[c % s_len] * w[c]);
 
+        let zr = [FqExt::ZERO; 3];
         let mut tr_p = Transcript::new("nb");
-        let (proof, r_p, _) = batched_w_reference(&w, lg.clone(), &apow, &tau0, lambda, &mut tr_p);
+        let (proof, r_p, _) = batched_w_reference(
+            &w,
+            lg.clone(),
+            &apow,
+            &tau0,
+            lambda,
+            LinMask([FqExt::ZERO; 2]),
+            ClaimMask { coef: &zr },
+            &mut tr_p,
+        );
+        let degs = round_degs(nv_w, 3, 7, 2);
         let mut tr_v = Transcript::new("nb");
         let (e_b, r_v) =
-            verify_batched_w(lambda * claim2, nv_w, &proof, &mut tr_v).expect("well-formed proof");
+            verify_batched_w(lambda * claim2, &degs, &proof, &mut tr_v).expect("well-formed");
         assert_eq!(r_p, r_v);
 
-        let w_at = mle_eval(&w, &r_v);
+        let rc = &r_v[..nv_w];
+        let cb = r_v[nv_w];
+        let w_at = mle_eval(&w, rc);
         let lg_at = mle_eval(&lg, &r_v[..nv_k]);
-        let ap_at = mle_eval(&apow, &r_v[nv_k..]);
-        let expect =
-            lambda * lg_at * ap_at * w_at + eq_eval(&tau0, &r_v) * w_at * (w_at - FqExt::ONE);
-        assert_ne!(e_b, expect, "non-binary W (cell {bad_cell} = {bad_val}) unexpectedly passed SC3");
+        let ap_at = mle_eval(&apow, &r_v[nv_k..nv_w]);
+        let expect = (FqExt::ONE - cb)
+            * (lambda * lg_at * ap_at * w_at + eq_eval(&tau0, rc) * w_at * (w_at - FqExt::ONE));
+        assert_ne!(e_b, expect, "a non-binary W (cell {bad_cell} = {bad_val}) was accepted by SC3");
     }
 
     #[test]
@@ -1074,8 +1599,9 @@ mod tests {
             let claim = rng.next_fq4();
             let _ = verify(claim, nv, deg, &p, &mut Transcript::new("f"));
             let _ = verify_eq_bitcheck(claim, &tau, &p, &mut Transcript::new("f"));
-            let _ = verify_product2(claim, nv, &p, &mut Transcript::new("f"));
-            let _ = verify_batched_w(claim, nv, &p, &mut Transcript::new("f"));
+            let degs: Vec<usize> = (0..nv).map(|_| deg).collect();
+            let _ = verify_product2(claim, &degs, &p, &mut Transcript::new("f"));
+            let _ = verify_batched_w(claim, &degs, &p, &mut Transcript::new("f"));
         }
     }
 
@@ -1088,19 +1614,27 @@ mod tests {
         let b: Vec<FqExt> = (0..1 << nv).map(|_| rng.next_fq4()).collect();
         let claim = a.iter().zip(&b).fold(FqExt::ZERO, |s, (&x, &y)| s + x * y);
 
+        let zr = [FqExt::ZERO; 3];
         let mut tr_p = Transcript::new("p2-test");
-        let (proof, r_p) = prove_product2(&a, b.clone(), None, &mut tr_p);
+        let (proof, r_p, _, _) =
+            prove_product2(&a, b.clone(), LinMask([FqExt::ZERO; 2]), ClaimMask { coef: &zr }, None, &mut tr_p);
 
+        let degs = round_degs(nv, 2, 4, 2);
         let mut tr_v = Transcript::new("p2-test");
-        let (expect, r_v) = verify_product2(claim, nv, &proof, &mut tr_v).expect("verify");
+        let (expect, r_v) = verify_product2(claim, &degs, &proof, &mut tr_v).expect("verify");
         assert_eq!(r_p, r_v);
         let lifted: Vec<FqExt> = a.iter().map(|&x| FqExt::from_fq(x)).collect();
-        assert_eq!(expect, mle_eval(&lifted, &r_v) * mle_eval(&b, &r_v));
+        let rc = &r_v[..nv];
+        let cq = r_v[nv];
+        assert_eq!(expect, (FqExt::ONE - cq) * mle_eval(&lifted, rc) * mle_eval(&b, rc));
 
         let mut tr_w = Transcript::new("p2-test");
         let (expect_w, r_w) =
-            verify_product2(claim + FqExt::ONE, nv, &proof, &mut tr_w).expect("well-formed");
-        assert_ne!(expect_w, mle_eval(&lifted, &r_w) * mle_eval(&b, &r_w));
+            verify_product2(claim + FqExt::ONE, &degs, &proof, &mut tr_w).expect("well-formed");
+        assert_ne!(
+            expect_w,
+            (FqExt::ONE - r_w[nv]) * mle_eval(&lifted, &r_w[..nv]) * mle_eval(&b, &r_w[..nv])
+        );
     }
 }
 
@@ -1153,6 +1687,10 @@ impl Masker {
 
     pub fn num_coeffs(&self) -> usize {
         self.nv * (self.deg + 1)
+    }
+
+    pub fn deg(&self) -> usize {
+        self.deg
     }
 
     pub fn coeffs_flat(&self) -> impl Iterator<Item = FqExt> + '_ {

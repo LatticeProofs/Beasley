@@ -28,9 +28,8 @@ fn main() {
     let rounds = proof.sc1_bilinear.rounds.len()
         + proof.sc_quotient.rounds.len()
         + proof.sc_batched.rounds.len()
-        + proof.sc4_bit.rounds.len()
         + proof.sc5_onehot.rounds.len();
-    println!("proof: 5 sumchecks, {rounds} rounds total");
+    println!("proof: 4 sumchecks, {rounds} rounds total");
 
     let t1 = Instant::now();
     let ok = verify(&params, &ch, &proof);

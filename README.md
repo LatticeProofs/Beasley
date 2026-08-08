@@ -1,7 +1,7 @@
 
 ```
 $env:RAYON_NUM_THREADS = 1
-cargo run --release --no-default-features --features q64 --bin phase_bench 128 8 5 1
+cargo run --release --bin phase_bench 128 8 5 1
 Remove-Item Env:RAYON_NUM_THREADS
 ```
 

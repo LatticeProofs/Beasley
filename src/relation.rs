@@ -37,7 +37,7 @@ pub struct Nizk1Ctx<'a> {
 impl<'a> Nizk1Ctx<'a> {
     pub fn new(params: &HashParams, nz: &'a Nizk1Params, st: &'a BlindStatement) -> Self {
         let a_r = crate::nizk1::derive_ar(nz.r_dim, params.ell, &st.c_r);
-        Nizk1Ctx { nz, st, a_r, w: w_layout(nz, num_m_rows(params)) }
+        Nizk1Ctx { nz, st, a_r, w: w_layout(params, Some(nz)) }
     }
     pub fn num_rows(&self) -> usize {
         self.nz.com_r.out_len() + self.nz.com_x.out_len()
@@ -49,11 +49,44 @@ pub fn ell_pad(params: &HashParams) -> usize {
 }
 
 pub fn phase_a_cells(params: &HashParams) -> usize {
-    ell_pad(params) * g_pad(params)
+    params.ell * g_pad(params)
 }
 
 pub fn g_pad(params: &HashParams) -> usize {
     params.num_groups().next_power_of_two()
+}
+
+pub fn hv_len(params: &HashParams) -> usize {
+    params.table_size()
+}
+
+pub fn h_cells(params: &HashParams) -> usize {
+    g_pad(params) * hv_len(params)
+}
+
+pub fn hpack_rows(params: &HashParams) -> usize {
+    let rows = h_cells(params).div_ceil(crate::nizk1::HPACK_BITS).max(1);
+    debug_assert!(rows.is_power_of_two(), "hpack_rows must be a power of two (precondition of hpack_point)");
+    rows
+}
+
+pub fn hpack_per(params: &HashParams) -> usize {
+    let per = h_cells(params) / hpack_rows(params);
+    debug_assert!(per.is_power_of_two() && per <= crate::nizk1::HPACK_BITS);
+    per
+}
+
+pub fn h_index(params: &HashParams, block: usize, v: usize) -> usize {
+    debug_assert!(v < hv_len(params));
+    block * hv_len(params) + v
+}
+
+pub fn h_bits(params: &HashParams, groups: &[usize]) -> Vec<bool> {
+    let mut out = vec![false; h_cells(params)];
+    for (i, &v) in groups.iter().enumerate() {
+        out[h_index(params, i, v)] = true;
+    }
+    out
 }
 
 pub fn cell_of(params: &HashParams, chain: usize, step_i: usize) -> usize {
@@ -324,7 +357,7 @@ pub fn build_rows(
                 }
             }
             CKind::ComRand { which, idx } => {
-                let ctx = nz.expect("ComRand requires the Phase B parameters");
+                let ctx = nz.expect("ComRand requires Phase B parameters");
                 let (a_hat_k, _) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 for (t, &coef) in a_hat_k[idx].iter().enumerate() {
@@ -334,7 +367,7 @@ pub fn build_rows(
                 p_pub = -if which == 0 { cr_hat[idx] } else { dx_hat[idx] };
             }
             CKind::ComMsg { which, idx } => {
-                let ctx = nz.expect("ComMsg requires the Phase B parameters");
+                let ctx = nz.expect("ComMsg requires Phase B parameters");
                 let (_, b_hat_k) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 let two = FqExt::from_u64(2);
@@ -409,7 +442,7 @@ mod tests {
                     assert_eq!(
                         rows.a_base[v][r][d],
                         params.a(v, r, d).eval(alpha),
-                        "a_base is not A^(v)[r][d](alpha): v={v} r={r} d={d}"
+                        "a_base is not A^(v)[r][d](α): v={v} r={r} d={d}"
                     );
                 }
             }
@@ -447,7 +480,7 @@ mod tests {
                 .flat_map(|i| wit.column(i))
                 .flat_map(|m| m.c.iter())
                 .any(|c| c.0 as u64 >= 2);
-            assert!(big, "the honest base-{GADGET_BASE} witness has no digit >= 2?");
+            assert!(big, "the honest base-{GADGET_BASE} witness has no digit ≥ 2?");
         }
     }
 

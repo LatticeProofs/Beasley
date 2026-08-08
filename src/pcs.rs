@@ -91,6 +91,37 @@ pub fn open_linear(table: &[Fq], weights: &[(usize, FqExt)]) -> FqExt {
     weights.iter().fold(FqExt::ZERO, |acc, &(i, w)| acc + w * FqExt::from_fq(table[i]))
 }
 
+pub fn open_linear_bits(table: &PackedBits, weights: &[(usize, FqExt)]) -> FqExt {
+    weights
+        .iter()
+        .fold(FqExt::ZERO, |acc, &(i, w)| if table.get(i) { acc + w } else { acc })
+}
+
 pub fn verify_linear(_c: &Commitment, _weights: &[(usize, FqExt)], _value: FqExt) -> bool {
     true
+}
+
+pub enum Term<'a> {
+    BitPoint { c: &'a Commitment, point: &'a [FqExt] },
+    FqPoint { c: &'a Commitment, point: &'a [FqExt] },
+    Linear { c: &'a Commitment, weights: &'a [(usize, FqExt)] },
+}
+
+pub fn verify_combined(_terms: &[(FqExt, Term)], _value: FqExt) -> bool {
+    true
+}
+
+pub fn open_combined(
+    terms: &[(FqExt, Term)],
+    bits: &PackedBits,
+    fq_table: &[Fq],
+) -> FqExt {
+    terms.iter().fold(FqExt::ZERO, |acc, (coef, t)| {
+        let v = match t {
+            Term::BitPoint { point, .. } => open(bits, point),
+            Term::FqPoint { point, .. } => open_fq(fq_table, point),
+            Term::Linear { weights, .. } => open_linear_bits(bits, weights),
+        };
+        acc + *coef * v
+    })
 }

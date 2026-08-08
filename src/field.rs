@@ -1,19 +1,19 @@
 use std::ops::{Add, Mul, Neg, Sub};
 
-pub const Q: u64 = 4294967197;
+pub const Q: u64 = 18446744073709551359;
 
-pub const C: u64 = 99;
+pub const C: u64 = 257;
 
-pub const GENERATOR: u64 = 6;
+pub const GENERATOR: u64 = 7;
 
 pub const FQ_BYTES: usize = ((64 - Q.leading_zeros()) as usize).div_ceil(8);
 
-const _: () = assert!(FQ_BYTES == 4, "q32 Fq must be 4 bytes");
+const _: () = assert!(FQ_BYTES == 8, "q64 Fq must be 8 bytes");
 
 #[inline(always)]
 pub fn fq_le_bytes(x: Fq) -> [u8; FQ_BYTES] {
     let mut out = [0u8; FQ_BYTES];
-    out.copy_from_slice(&(x.0 as u64).to_le_bytes()[..FQ_BYTES]);
+    out.copy_from_slice(&x.0.to_le_bytes()[..FQ_BYTES]);
     out
 }
 
@@ -24,21 +24,24 @@ pub fn fq_from_words(mut next_u32: impl FnMut() -> u32) -> u64 {
 }
 
 #[inline(always)]
-pub fn reduce64(v: u64) -> u32 {
-    let v = (v & 0xFFFF_FFFF) + C * (v >> 32);
-    let v = (v & 0xFFFF_FFFF) + C * (v >> 32);
-    (if v >= Q { v - Q } else { v }) as u32
+pub fn reduce128(t: u128) -> u64 {
+    let (lo, hi) = (t as u64, (t >> 64) as u64);
+    let r1 = lo as u128 + (C as u128) * (hi as u128);
+    let (l2, h2) = (r1 as u64, (r1 >> 64) as u64);
+    let (s, carry) = l2.overflowing_add(C.wrapping_mul(h2));
+    let s = if carry { s.wrapping_add(C) } else { s };
+    if s >= Q { s - Q } else { s }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
-pub struct Fq(pub u32);
+pub struct Fq(pub u64);
 
 impl Fq {
     pub const ZERO: Fq = Fq(0);
     pub const ONE: Fq = Fq(1);
 
     pub fn new(v: u64) -> Self {
-        Fq((v % Q) as u32)
+        Fq(v % Q)
     }
 
     pub fn pow(self, mut e: u64) -> Self {
@@ -68,8 +71,9 @@ impl Add for Fq {
     type Output = Fq;
     #[inline(always)]
     fn add(self, rhs: Fq) -> Fq {
-        let s = self.0 as u64 + rhs.0 as u64;
-        Fq(if s >= Q { (s - Q) as u32 } else { s as u32 })
+        let (s, carry) = self.0.overflowing_add(rhs.0);
+        let s = if carry { s.wrapping_add(C) } else { s };
+        Fq(if s >= Q { s - Q } else { s })
     }
 }
 
@@ -77,8 +81,7 @@ impl Sub for Fq {
     type Output = Fq;
     #[inline(always)]
     fn sub(self, rhs: Fq) -> Fq {
-        let s = self.0 as u64 + Q - rhs.0 as u64;
-        Fq(if s >= Q { (s - Q) as u32 } else { s as u32 })
+        Fq(if self.0 >= rhs.0 { self.0 - rhs.0 } else { self.0.wrapping_sub(rhs.0).wrapping_add(Q) })
     }
 }
 
@@ -86,7 +89,7 @@ impl Mul for Fq {
     type Output = Fq;
     #[inline(always)]
     fn mul(self, rhs: Fq) -> Fq {
-        Fq(reduce64(self.0 as u64 * rhs.0 as u64))
+        Fq(reduce128((self.0 as u128) * (rhs.0 as u128)))
     }
 }
 
@@ -102,6 +105,10 @@ impl Neg for Fq {
 mod tests {
     use super::*;
 
+    fn naive(t: u128) -> u64 {
+        (t % Q as u128) as u64
+    }
+
     #[test]
     fn basic_ops() {
         let a = Fq::new(Q - 1);
@@ -109,39 +116,91 @@ mod tests {
         assert_eq!(a + b, Fq::ONE);
         assert_eq!(Fq::ZERO - b, Fq::new(Q - 2));
         assert_eq!(a * a, Fq::ONE);
+        assert_eq!(a + a, Fq::new(Q - 2));
     }
 
     #[test]
     fn inverse() {
-        for v in [1u64, 2, 6, 12345, Q - 1] {
+        for v in [1u64, 2, 7, 12345, Q - 1, Q / 2] {
             let a = Fq::new(v);
             assert_eq!(a * a.inv(), Fq::ONE);
         }
     }
 
     #[test]
-    fn reduce_matches_mod() {
-        let mut s = 0x1234_5678_9abc_def0u64;
-        for _ in 0..100000 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            assert_eq!(reduce64(s) as u64, s % Q);
+    fn reduce128_matches_u128_mod() {
+        let mut s: u128 = 0x1234_5678_9abc_def0_0fed_cba9_8765_4321;
+        for _ in 0..1_000_000 {
+            s = s
+                .wrapping_mul(0x2360_ED05_1FC6_5DA4_4385_DF64_9FCC_F645)
+                .wrapping_add(0x1442_7952_1CBD_A5B0_5D0A_A83F_7E6A_1B7F);
+            assert_eq!(reduce128(s), naive(s), "t = {s}");
         }
-        let m = Q - 1;
-        assert_eq!(reduce64(m * m) as u64, (m * m) % Q);
+        let m = (Q - 1) as u128;
+        for t in [
+            m * m,
+            (Q as u128) * (Q as u128) - 1,
+            u128::MAX,
+            u128::MAX - 1,
+            1u128 << 64,
+            (1u128 << 64) - 1,
+            Q as u128,
+            (Q as u128) - 1,
+            (Q as u128) * 3,
+            0,
+        ] {
+            assert_eq!(reduce128(t), naive(t), "t = {t}");
+        }
+        for hi in [C, C - 1, C - 2, 1u64, 2, 0xFFFF_FFFF_FFFF_FFFF] {
+            for delta in 0..2048u64 {
+                let lo = u64::MAX - delta;
+                let t = ((hi as u128) << 64) | lo as u128;
+                assert_eq!(reduce128(t), naive(t), "hi = {hi}, lo = {lo}");
+            }
+        }
     }
 
     #[test]
     fn generator_has_full_order() {
+        let factors: [u64; 5] = [2, 11, 197, 257, 16561424618041];
+        let mut prod: u128 = 1;
+        for f in factors {
+            prod *= f as u128;
+        }
+        assert_eq!(prod, (Q - 1) as u128, "prime factorization is wrong");
         let g = Fq::new(GENERATOR);
-        for p in [2u64, 3, 13, 67, 163, 2521] {
-            assert_ne!(g.pow((Q - 1) / p), Fq::ONE);
+        for p in factors {
+            assert_ne!(g.pow((Q - 1) / p), Fq::ONE, "GENERATOR = {GENERATOR} is not a generator for p = {p}");
+        }
+        for bad in [2u64, 3, 5, 6] {
+            let b = Fq::new(bad);
+            assert!(
+                factors.iter().any(|&p| b.pow((Q - 1) / p) == Fq::ONE),
+                "{bad} turned out to be a generator?"
+            );
         }
     }
 
     #[test]
     fn roots_of_unity() {
-        let w = Fq::root_of_unity(4);
-        assert_eq!(w.pow(4), Fq::ONE);
-        assert_eq!(w.pow(2), Fq::new(Q - 1));
+        assert_eq!((Q - 1) % 2, 0);
+        assert_ne!((Q - 1) % 4, 0, "v₂(q−1) should be 1");
+        let w = Fq::root_of_unity(2);
+        assert_eq!(w, Fq::new(Q - 1));
+        assert_eq!(w.pow(2), Fq::ONE);
+    }
+
+    #[test]
+    fn q_is_three_mod_four() {
+        assert_eq!(Q % 4, 3);
+        assert_eq!((1u128 << 64) - Q as u128, C as u128, "2^64 − q must equal C");
+        assert_eq!(Fq::new(Q - 1).pow((Q - 1) / 2), Fq::new(Q - 1));
+    }
+
+    #[test]
+    fn serialisation_width() {
+        assert_eq!(FQ_BYTES, 8);
+        let x = Fq::new(0x0123_4567_89ab_cdef);
+        assert_eq!(fq_le_bytes(x), 0x0123_4567_89ab_cdefu64.to_le_bytes());
     }
 }

@@ -171,7 +171,7 @@ mod tests {
         let all = [by_u64, by_fq, by_fqs, by_fq4];
         for i in 0..4 {
             for j in i + 1..4 {
-                assert_ne!(all[i], all[j], "type tags {i} and {j} collide");
+                assert_ne!(all[i], all[j], "type {i} collides with type {j}");
             }
         }
         let two = Fq::new(2);
@@ -193,14 +193,11 @@ mod tests {
         let d = t.challenge_fq4();
         let got: Vec<u64> = d.coeffs().iter().map(|c| c.0 as u64).collect();
 
-        #[cfg(feature = "q32")]
-        let want: Vec<u64> = vec![379608887, 773585188, 179761591, 1944056472];
-        #[cfg(feature = "q64")]
         let want: Vec<u64> = vec![14664575010480232952, 13599215798014194027];
 
         assert_eq!(
             got, want,
-            "transcript canonical encoding changed -- this invalidates every old proof; confirm it is intentional"
+            "transcript canonical encoding changed -- this invalidates every existing proof; confirm it is intentional"
         );
     }
 
@@ -216,7 +213,7 @@ mod tests {
                 hi += 1;
             }
         }
-        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "distribution skewed: upper half {hi}/{N}");
+        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "skewed distribution: upper half {hi}/{N}");
     }
 
     #[test]

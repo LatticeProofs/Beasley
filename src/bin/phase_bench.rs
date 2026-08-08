@@ -2,7 +2,7 @@ use std::time::Instant;
 use voprf::ext_field::FqExt;
 use voprf::hash::{bits_to_groups, eval_h};
 use voprf::params::HashParams;
-use voprf::nizk1::{sample_blind, Nizk1Params, COM_N, R_DIM, W_SLACK};
+use voprf::nizk1::{sample_blind, Nizk1Params, QueryCounter, COM_N, R_DIM, W_SLACK};
 use voprf::proof::{prove, proof_fingerprint, prove_nizk1_with_timings, prove_with_timings, verify, verify_nizk1};
 use voprf::relation::{build_rows, compute_quotients};
 use voprf::rng::insecure_test_secret;
@@ -70,7 +70,7 @@ fn main() {
     let t = Instant::now();
     let rows = build_rows(&params, &ch, alpha, None);
     println!(
-        "build_rows(a_base):{:?}  ({} symbols x {} rows x {} cols = {} evaluations of length {}; u-side flattened width {})",
+        "build_rows(a_base):{:?}  ({} symbols × {} rows × {} cols = {} evaluations of length {}; u-side flattened width {})",
         t.elapsed(),
         rows.a_base.len(),
         rows.a_base[0].len(),
@@ -84,12 +84,8 @@ fn main() {
     let _ = prove(&params, &groups);
 
     let nz = Nizk1Params::sample(31337, &params, R_DIM, COM_N, W_SLACK);
-    let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-    let mut hb = vec![false; h_cells];
-    for (i, &v) in groups.iter().enumerate() {
-        hb[i * params.table_size() + v] = true;
-    }
-    let bw = sample_blind(&insecure_test_secret(4242), 0, &nz, &hb);
+    let mut ctr = QueryCounter::new(insecure_test_secret(4242));
+    let bw = sample_blind(ctr.issue(), &params, &nz, &groups);
 
     {
         use voprf::nizk1::{blind_statement, derive_ar};
@@ -133,27 +129,27 @@ fn main() {
         ("SC1", &proof.sc1_bilinear),
         ("SC_quot", &proof.sc_quotient),
         ("SC_batched", &proof.sc_batched),
-        ("SC4", &proof.sc4_bit),
         ("SC5", &proof.sc5_onehot),
     ];
-    let rounds: usize = sc.iter().map(|(_, p)| p.rounds.len()).sum();
-    let vals: usize = sc.iter().map(|(_, p)| p.rounds.iter().map(|r| r.len()).sum::<usize>()).sum();
-    let scalars = 8
-        + proof.mask_totals.len()
-        + proof.mask_evals.len()
-        + proof.open_h_eq.is_some() as usize
-        + proof.open_hpack.is_some() as usize;
-    let ext_bytes = voprf::ext_field::EXT_DEG * voprf::field::FQ_BYTES;
+    let bytes = proof.to_bytes();
+    let b = proof.size_breakdown();
+    assert_eq!(bytes.len(), b.total(), "serialized length disagrees with the size breakdown");
     println!(
-        "proof size:        {} F_q^{} elements = {} bytes ({} rounds; {})",
-        vals + scalars,
-        voprf::ext_field::EXT_DEG,
-        (vals + scalars) * ext_bytes,
-        rounds,
+        "proof size:        {} B transcript (sumcheck {} B + plaintext scalars {} B; {} rounds; {})",
+        b.transcript(),
+        b.sumcheck,
+        b.public_scalars,
+        proof.num_rounds(),
         sc.iter()
             .map(|(n, p)| format!("{n}:{}", p.rounds.len()))
             .collect::<Vec<_>>()
             .join(" ")
+    );
+    println!(
+        "  serialized total:  {} B (+ framing {} B + commitment STUB {} B)",
+        bytes.len(),
+        b.framing,
+        b.commitments_stub
     );
 
     println!("proof fingerprint: {:#018x}", proof_fingerprint(&proof));
@@ -168,8 +164,8 @@ fn main() {
     if nizk1 == 1 {
         voprf::report::report(&params, &nz, 2, 1).print();
         println!(
-            "  sumcheck transcript                  = {:>8.2} KB (measured locally, see the proof size line above)",
-            (vals + scalars) as f64 * ext_bytes as f64 / 1024.0
+            "  sumcheck transcript                  = {:>8.2} KB (**measured**: ser::to_bytes)",
+            b.transcript() as f64 / 1024.0
         );
     }
 }

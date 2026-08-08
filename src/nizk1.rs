@@ -5,17 +5,8 @@ use crate::params::HashParams;
 use crate::ring::{reduce_only, RingElem, N};
 use crate::rng::CsRng;
 
-#[cfg(feature = "q32")]
-pub const R_DIM: usize = 6;
-#[cfg(feature = "q64")]
 pub const R_DIM: usize = 10;
-#[cfg(feature = "q32")]
-pub const COM_N: usize = 6;
-#[cfg(feature = "q64")]
 pub const COM_N: usize = 5;
-#[cfg(feature = "q32")]
-pub const W_SLACK: usize = 3;
-#[cfg(feature = "q64")]
 pub const W_SLACK: usize = 5;
 
 pub const HPACK_BITS: usize = 512;
@@ -60,7 +51,7 @@ pub fn derive_ar(r_dim: usize, ell: usize, c_r: &[RingElem]) -> Vec<Vec<RingElem
     for e in c_r {
         debug_assert_eq!(e.c.len(), N);
         for c in &e.c {
-            debug_assert!((c.0 as u64) < crate::field::Q, "c_r coefficients must be canonical representatives");
+            debug_assert!((c.0 as u64) < crate::field::Q, "the coefficients of c_r must be canonical representatives");
             enc.extend_from_slice(&crate::field::fq_le_bytes(*c));
         }
     }
@@ -107,10 +98,9 @@ fn nizk1_crs_digest(r_dim: usize, hpack_len: usize, com_r: &ComKey, com_x: &ComK
 impl Nizk1Params {
     pub fn sample(seed: u64, params: &HashParams, r_dim: usize, com_n: usize, w: usize) -> Self {
         let mut rng = CsRng::from_parts("voprf-nizk1-crs-v1", &[&seed.to_le_bytes()]);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        assert!(h_cells.is_power_of_two(), "h_cells = g_pad*2^g must be a power of two (precondition for hpack indexing)");
-        let hpack_len = h_cells.div_ceil(HPACK_BITS).max(1);
-        debug_assert!(hpack_len.is_power_of_two(), "hpack_len must be a power of two (see hpack_bits)");
+        let h_cells = crate::relation::h_cells(params);
+        assert!(h_cells.is_power_of_two(), "h_cells = g_pad·2·2^g must be a power of two (precondition of hpack indexing)");
+        let hpack_len = crate::relation::hpack_rows(params);
         let com_r = ComKey::sample(&mut rng, com_n, 2 * r_dim, w);
         let com_x = ComKey::sample(&mut rng, com_n, hpack_len, w);
         let crs_digest = nizk1_crs_digest(r_dim, hpack_len, &com_r, &com_x);
@@ -155,28 +145,75 @@ fn rand_bits(rng: &mut CsRng, n: usize) -> Vec<RingElem> {
         .collect()
 }
 
-pub fn sample_blind(
-    secret: &[u8; 32],
+pub struct QueryTicket {
+    secret: [u8; 32],
     counter: u64,
+}
+
+impl QueryTicket {
+    pub fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    pub fn insecure_for_tests(secret: [u8; 32], counter: u64) -> Self {
+        QueryTicket { secret, counter }
+    }
+}
+
+pub struct QueryCounter {
+    secret: [u8; 32],
+    next: u64,
+}
+
+impl QueryCounter {
+    pub fn new(secret: [u8; 32]) -> Self {
+        QueryCounter { secret, next: 0 }
+    }
+
+    pub fn resume(secret: [u8; 32], next: u64) -> Self {
+        QueryCounter { secret, next }
+    }
+
+    pub fn peek(&self) -> u64 {
+        self.next
+    }
+
+    pub fn issue(&mut self) -> QueryTicket {
+        let counter = self.next;
+        self.next = self.next.checked_add(1).expect("query counter overflow: use a fresh client secret");
+        QueryTicket { secret: self.secret, counter }
+    }
+}
+
+pub fn sample_blind(
+    ticket: QueryTicket,
+    params: &HashParams,
     nz: &Nizk1Params,
-    h_bits: &[bool],
+    groups: &[usize],
 ) -> BlindWitness {
-    let mut rng = CsRng::from_parts("voprf-nizk1-blind-v1", &[secret, &counter.to_le_bytes()]);
+    let QueryTicket { secret, counter } = ticket;
+    let mut rng =
+        CsRng::from_parts("voprf-nizk1-blind-v1", &[&secret, &counter.to_le_bytes()]);
     let rho_len = nz.com_r.rho_len();
+    let r_pos = rand_bits(&mut rng, nz.r_dim);
+    let r_neg = rand_bits(&mut rng, nz.r_dim);
+    let rho_r_pos = rand_bits(&mut rng, rho_len);
+    let rho_r_neg = rand_bits(&mut rng, rho_len);
+    let rho_x_pos = rand_bits(&mut rng, nz.com_x.rho_len());
+    let rho_x_neg = rand_bits(&mut rng, nz.com_x.rho_len());
+    let h_pack = pack_h(nz, &crate::relation::h_bits(params, groups));
+    let mut zk_seed = [0u8; 32];
+    rng.fill_bytes(&mut zk_seed);
     BlindWitness {
         counter,
-        r_pos: rand_bits(&mut rng, nz.r_dim),
-        r_neg: rand_bits(&mut rng, nz.r_dim),
-        rho_r_pos: rand_bits(&mut rng, rho_len),
-        rho_r_neg: rand_bits(&mut rng, rho_len),
-        rho_x_pos: rand_bits(&mut rng, nz.com_x.rho_len()),
-        rho_x_neg: rand_bits(&mut rng, nz.com_x.rho_len()),
-        h_pack: pack_h(nz, h_bits),
-        zk_seed: {
-            let mut sd = [0u8; 32];
-            rng.fill_bytes(&mut sd);
-            sd
-        },
+        r_pos,
+        r_neg,
+        rho_r_pos,
+        rho_r_neg,
+        rho_x_pos,
+        rho_x_neg,
+        h_pack,
+        zk_seed,
     }
 }
 
@@ -299,57 +336,56 @@ pub fn check_blind(
         && st2.d_x == st.d_x
 }
 
-pub const ZK_MASK_ROWS: usize = 1;
-
-const _: () = assert!(ZK_MASK_ROWS >= 1, "ZK witness-level masking needs at least one row");
-
-pub fn zk_mask_rows(rng: &mut CsRng) -> Vec<RingElem> {
-    rand_bits(rng, ZK_MASK_ROWS)
-}
-
-pub fn extra_w_rows(nz: &Nizk1Params) -> usize {
-    2 * nz.r_dim
-        + 2 * nz.com_r.rho_len()
-        + nz.hpack_len.next_power_of_two()
-        + 2 * nz.com_x.rho_len()
-        + ZK_MASK_ROWS
+pub fn extra_w_rows(params: &HashParams, nz: Option<&Nizk1Params>) -> usize {
+    w_layout(params, nz).total - crate::relation::num_m_rows(params)
 }
 
 pub struct WLayout {
+    pub h_pack: usize,
     pub r_pos: usize,
     pub r_neg: usize,
     pub rho_r_pos: usize,
     pub rho_r_neg: usize,
-    pub h_pack: usize,
     pub rho_x_pos: usize,
     pub rho_x_neg: usize,
-    pub mask: usize,
     pub total: usize,
 }
 
-pub fn w_layout(nz: &Nizk1Params, base: usize) -> WLayout {
+pub fn w_layout(params: &HashParams, nz: Option<&Nizk1Params>) -> WLayout {
+    let base = crate::relation::num_m_rows(params);
+    let hp = crate::relation::hpack_rows(params);
+    let h_pack = base.next_multiple_of(hp);
+    let after_h = h_pack + hp;
+    let Some(nz) = nz else {
+        return WLayout {
+            h_pack,
+            r_pos: after_h,
+            r_neg: after_h,
+            rho_r_pos: after_h,
+            rho_r_neg: after_h,
+            rho_x_pos: after_h,
+            rho_x_neg: after_h,
+            total: after_h,
+        };
+    };
     let rho_r = nz.com_r.rho_len();
     let rho_x = nz.com_x.rho_len();
-    let hp = nz.hpack_len.next_power_of_two();
-    let r_pos = base;
+    debug_assert_eq!(nz.hpack_len, hp, "Nizk1Params::hpack_len is out of sync with relation::hpack_rows");
+    let r_pos = after_h;
     let r_neg = r_pos + nz.r_dim;
     let rho_r_pos = r_neg + nz.r_dim;
     let rho_r_neg = rho_r_pos + rho_r;
-    let after = rho_r_neg + rho_r;
-    let h_pack = after.next_multiple_of(hp);
-    let rho_x_pos = h_pack + hp;
+    let rho_x_pos = rho_r_neg + rho_r;
     let rho_x_neg = rho_x_pos + rho_x;
-    let mask = rho_x_neg + rho_x;
     WLayout {
+        h_pack,
         r_pos,
         r_neg,
         rho_r_pos,
         rho_r_neg,
-        h_pack,
         rho_x_pos,
         rho_x_neg,
-        mask,
-        total: mask + ZK_MASK_ROWS,
+        total: rho_x_neg + rho_x,
     }
 }
 
@@ -368,12 +404,7 @@ mod tests {
         let bits: Vec<bool> = (0..8).map(|_| rng.next_bool()).collect();
         let groups = bits_to_groups(&params, &bits);
         let (ch, _) = eval_h(&params, &groups);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        let mut hb = vec![false; h_cells];
-        for (i, &v) in groups.iter().enumerate() {
-            hb[i * params.table_size() + v] = true;
-        }
-        let w = sample_blind(&insecure_test_secret(8), 0, &nz, &hb);
+        let w = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(8), 0), &params, &nz, &groups);
         let (st, _) = blind_statement(&params, &nz, &ch, &w);
         assert!(check_blind(&params, &nz, &ch, &w, &st));
     }
@@ -382,16 +413,15 @@ mod tests {
     fn blinding_depends_on_the_secret() {
         let params = HashParams::sample(21, 8, 2, 1);
         let nz = Nizk1Params::sample(22, &params, 3, 2, 2);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        let hb = vec![false; h_cells];
-        let a = sample_blind(&insecure_test_secret(1), 0, &nz, &hb);
-        let b = sample_blind(&insecure_test_secret(2), 0, &nz, &hb);
-        let a2 = sample_blind(&insecure_test_secret(1), 0, &nz, &hb);
+        let g0 = vec![0usize; params.num_groups()];
+        let a = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(1), 0), &params, &nz, &g0);
+        let b = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(2), 0), &params, &nz, &g0);
+        let a2 = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(1), 0), &params, &nz, &g0);
         assert_eq!(a.r_pos, a2.r_pos, "the same secret must be deterministic");
         assert_eq!(a.rho_x_pos, a2.rho_x_pos);
-        assert_ne!(a.r_pos, b.r_pos, "different secret => different R+");
-        assert_ne!(a.rho_r_pos, b.rho_r_pos, "different secret => different rho_r+");
-        assert_ne!(a.rho_x_pos, b.rho_x_pos, "different secret => different rho_x+");
+        assert_ne!(a.r_pos, b.r_pos, "different secret => different R⁺");
+        assert_ne!(a.rho_r_pos, b.rho_r_pos, "different secret => different ρ_r⁺");
+        assert_ne!(a.rho_x_pos, b.rho_x_pos, "different secret => different ρ_x⁺");
         assert_ne!(a.r_pos, a.r_neg);
         assert_ne!(a.rho_r_pos, a.rho_x_pos);
     }
@@ -400,28 +430,49 @@ mod tests {
     fn blinding_differs_across_counters() {
         let params = HashParams::sample(41, 8, 2, 1);
         let nz = Nizk1Params::sample(42, &params, 3, 2, 2);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        let hb = vec![false; h_cells];
+        let g0 = vec![0usize; params.num_groups()];
         let secret = insecure_test_secret(43);
-        let ws: Vec<_> = (0..3u64).map(|j| sample_blind(&secret, j, &nz, &hb)).collect();
+        let mut ctr = QueryCounter::new(secret);
+        let ws: Vec<_> =
+            (0..3).map(|_| sample_blind(ctr.issue(), &params, &nz, &g0)).collect();
+        assert_eq!(ctr.peek(), 3, "the counter did not advance after issue");
         for i in 0..ws.len() {
             assert_eq!(ws[i].counter, i as u64);
             for k in (i + 1)..ws.len() {
-                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}: identical R+");
-                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}: identical R-");
-                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}: identical rho_r+");
-                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}: identical rho_x+");
+                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}: identical R⁺");
+                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}: identical R⁻");
+                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}: identical ρ_r⁺");
+                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}: identical ρ_x⁺");
             }
         }
-        assert_eq!(ws[1].r_pos, sample_blind(&secret, 1, &nz, &hb).r_pos);
+        let replay = sample_blind(
+            QueryTicket::insecure_for_tests(secret, 1),
+            &params,
+            &nz,
+            &g0,
+        );
+        assert_eq!(ws[1].r_pos, replay.r_pos);
+        assert_eq!(QueryCounter::resume(secret, 7).issue().counter(), 7);
+    }
+
+    #[test]
+    fn distinct_tickets_give_distinct_mask_seeds() {
+        let params = HashParams::sample(44, 8, 2, 1);
+        let nz = Nizk1Params::sample(45, &params, 3, 2, 2);
+        let g0 = vec![0usize; params.num_groups()];
+        let mut ctr = QueryCounter::new(insecure_test_secret(46));
+        let a = sample_blind(ctr.issue(), &params, &nz, &g0);
+        let b = sample_blind(ctr.issue(), &params, &nz, &g0);
+        assert_ne!(a.zk_seed, b.zk_seed, "two tickets share the same zk_seed => the masks cancel under subtraction");
+        assert_ne!(a.counter, b.counter);
     }
 
     #[test]
     fn blinding_is_binary_and_balanced() {
         let params = HashParams::sample(31, 8, 2, 1);
         let nz = Nizk1Params::sample(32, &params, 3, 2, 2);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        let w = sample_blind(&insecure_test_secret(33), 0, &nz, &vec![false; h_cells]);
+        let g0 = vec![0usize; params.num_groups()];
+        let w = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(33), 0), &params, &nz, &g0);
         for (name, seg) in [
             ("r_pos", &w.r_pos),
             ("r_neg", &w.r_neg),
@@ -441,7 +492,7 @@ mod tests {
                 .sum();
             assert!(
                 ones > total * 40 / 100 && ones < total * 60 / 100,
-                "{name} imbalanced: {ones}/{total}"
+                "{name} is imbalanced: {ones}/{total}"
             );
         }
     }
@@ -454,12 +505,7 @@ mod tests {
         let bits: Vec<bool> = (0..8).map(|_| rng.next_bool()).collect();
         let groups = bits_to_groups(&params, &bits);
         let (ch, _) = eval_h(&params, &groups);
-        let h_cells = params.num_groups().next_power_of_two() * params.table_size();
-        let mut hb = vec![false; h_cells];
-        for (i, &v) in groups.iter().enumerate() {
-            hb[i * params.table_size() + v] = true;
-        }
-        let w = sample_blind(&insecure_test_secret(12), 0, &nz, &hb);
+        let w = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(12), 0), &params, &nz, &groups);
         let (st, _) = blind_statement(&params, &nz, &ch, &w);
         let a_r = derive_ar(nz.r_dim, params.ell, &st.c_r);
         let r = diff(&w.r_pos, &w.r_neg);
@@ -470,6 +516,81 @@ mod tests {
             }
             assert_eq!(acc, st.c_x[j], "chain {j}");
         }
+    }
+
+    #[test]
+    fn hpack_segment_layout_invariants() {
+        use crate::relation::{h_cells, hpack_per, hpack_rows, num_m_rows};
+        let mut saw_rounding = false;
+        let mut saw_single_row = false;
+        let mut saw_padding_blocks = false;
+        for &(n, g) in &[
+            (8usize, 1usize),
+            (8, 2),
+            (8, 4),
+            (8, 8),
+            (12, 2),
+            (12, 1),
+            (16, 1),
+            (16, 2),
+            (16, 4),
+            (16, 8),
+            (24, 8),
+            (32, 8),
+            (48, 8),
+            (64, 8),
+            (128, 8),
+            (256, 8),
+            (512, 8),
+            (1024, 8),
+            (1040, 8),
+        ] {
+            for ell in [1usize, 2, 3, 5] {
+                if n % g != 0 || n / g < 2 {
+                    continue;
+                }
+                let params = HashParams::dims_only(n, g, ell);
+                let hp = hpack_rows(&params);
+                let per = hpack_per(&params);
+                assert!(hp.is_power_of_two(), "hpack_rows is not a power of two (n={n} g={g})");
+                assert!(per.is_power_of_two(), "hpack_per is not a power of two (n={n} g={g})");
+                assert_eq!(hp * per, h_cells(&params), "incomplete shape (n={n} g={g})");
+                assert!(per <= N, "a single W row cannot hold {per} cells (n={n} g={g})");
+                if params.num_groups() < crate::relation::g_pad(&params) {
+                    saw_padding_blocks = true;
+                }
+                if hp == 1 {
+                    saw_single_row = true;
+                }
+                if num_m_rows(&params) % hp != 0 {
+                    saw_rounding = true;
+                }
+                let nz = Nizk1Params::sample(1, &params, 3, 2, 2);
+                assert_eq!(nz.hpack_len, hp, "Nizk1Params::hpack_len is out of sync (n={n} g={g})");
+                for lay in [w_layout(&params, None), w_layout(&params, Some(&nz))] {
+                    assert_eq!(lay.h_pack % hp, 0, "h_pack is not aligned to hpack_rows (n={n} g={g})");
+                    assert!(lay.h_pack >= num_m_rows(&params), "h_pack collides with the bit rows of m");
+                    assert!(lay.h_pack + hp <= lay.total, "the h_pack segment overflows total");
+                }
+                let b = w_layout(&params, Some(&nz));
+                let mut prev = b.h_pack + hp;
+                for (name, start) in [
+                    ("r_pos", b.r_pos),
+                    ("r_neg", b.r_neg),
+                    ("rho_r_pos", b.rho_r_pos),
+                    ("rho_r_neg", b.rho_r_neg),
+                    ("rho_x_pos", b.rho_x_pos),
+                    ("rho_x_neg", b.rho_x_neg),
+                ] {
+                    assert!(start >= prev, "{name} overlaps the previous segment (n={n} g={g})");
+                    prev = start;
+                }
+                assert_eq!(b.total, b.rho_x_neg + nz.com_x.rho_len());
+            }
+        }
+        assert!(saw_single_row, "no shape with hpack_rows == 1 was exercised");
+        assert!(saw_padding_blocks, "no shape with g_pad > G (padding blocks present) was exercised");
+        assert!(saw_rounding, "no shape where num_m_rows needs rounding up was exercised");
     }
 
     #[test]

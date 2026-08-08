@@ -115,8 +115,8 @@ pub fn report(params: &HashParams, nz: &Nizk1Params, p_round: u64, beta_r: u64) 
     let q = crate::field::Q;
     let q_bits = 64 - q.leading_zeros();
 
-    let w = crate::nizk1::w_layout(nz, num_m_rows(params));
-    let kw_pad = w.total.next_power_of_two();
+    let w = crate::nizk1::w_layout(params, Some(nz));
+    let kw_pad = (w.total + crate::proof::MASK_COEF_ROWS).next_power_of_two();
     let c_cells = (phase_a_cells(params) + nz.com_r.out_len() + nz.com_x.out_len())
         .next_power_of_two();
     let nv_c = c_cells.trailing_zeros() as usize;
@@ -139,18 +139,11 @@ pub fn report(params: &HashParams, nz: &Nizk1Params, p_round: u64, beta_r: u64) 
     let nv_w = (kw_pad << W_COEF_VARS).trailing_zeros() as usize;
     let nv_h = nv_i + params.group_bits;
     let nv_t = (c_cells << T_COEF_VARS).trailing_zeros() as usize;
-    let pcs_batched_bytes = hachi_open_bytes(nv_w, true, 2)
-        + hachi_open_bytes(nv_h, true, 4)
-        + hachi_open_bytes(nv_t, false, 2);
-    let pcs_unbatched_bytes = 2 * hachi_open_bytes(nv_w, true, 1)
-        + 4 * hachi_open_bytes(nv_h, true, 1)
-        + 2 * hachi_open_bytes(nv_t, false, 1);
+    let pcs_batched_bytes = hachi_open_bytes(nv_w, true, 4) + hachi_open_bytes(nv_t, false, 1);
+    let pcs_unbatched_bytes =
+        4 * hachi_open_bytes(nv_w, true, 1) + hachi_open_bytes(nv_t, false, 1);
     let mask_fq = EXT_DEG
-        * ((nv_u_of(nv_c, params.group_bits) * 4)
-            + (nv_t * 3)
-            + (nv_w * 4)
-            + (nv_h * 3)
-            + (nv_i * 3));
+        * ((nv_u_of(nv_c, params.group_bits) * 4) + (nv_t * 3) + (nv_w * 4) + (nv_i * 3));
     let pcs_mask_own_commitment_bytes =
         hachi_open_bytes(mask_fq.next_power_of_two().trailing_zeros() as usize, false, 2);
 
@@ -181,11 +174,11 @@ pub fn report(params: &HashParams, nz: &Nizk1Params, p_round: u64, beta_r: u64) 
         rho_x_len: nz.com_x.rho_len(),
         hpack_len: nz.hpack_len,
         num_m_rows: num_m_rows(params),
-        extra_w_rows: crate::nizk1::extra_w_rows(nz),
+        extra_w_rows: crate::nizk1::extra_w_rows(params, Some(nz)),
         kw_pad,
         nv_w,
         nv_c,
-        nv_u: nv_c + params.group_bits,
+        nv_u: nv_u_of(nv_c, params.group_bits),
         nv_h,
         nv_t,
         num_quotients: num_quotients_of(params, nz),
@@ -228,9 +221,9 @@ impl ParamReport {
             self.r_dim, self.com_n, self.w_slack, self.rho_r_len, self.rho_x_len, self.hpack_len
         );
         println!("
-=== Lattice dimensions (all must be >= {:.0}, delta_0 = {}, sigma = {:.3}) ===", self.lattice.target, TARGET_DELTA0, SIGMA);
+=== Lattice dimensions (all must be >= {:.0}, δ₀ = {}, σ = {:.3}) ===", self.lattice.target, TARGET_DELTA0, SIGMA);
         for (name, n) in self.lattice.all() {
-            let ok = if (n as f64) >= self.lattice.target { "OK" } else { "**TOO SMALL**" };
+            let ok = if (n as f64) >= self.lattice.target { "OK" } else { "**INSUFFICIENT**" };
             println!("  {name:<16} = {n:>6}   {ok}");
         }
         println!("\n=== Cube dimensions ===");
@@ -239,7 +232,7 @@ impl ParamReport {
             self.num_m_rows, self.extra_w_rows, self.kw_pad, self.nv_w
         );
         println!(
-            "  nv_c {}   nv_u {}   nv_h {}   nv_t {}   quotients {}",
+            "  nv_c {}   nv_u {}   nv_h {}   nv_t {}   {} quotients",
             self.nv_c, self.nv_u, self.nv_h, self.nv_t, self.num_quotients
         );
         println!("\n=== LeOPaRd Thm 6/7 (correctness / uniqueness) ===");
@@ -249,10 +242,10 @@ impl ParamReport {
         );
         println!("  pu = h·d·(2Bf+1)/⌊q/p⌋ = 2^{:.1}  ⇒  κ ≈ {:.1}", self.pu_log2, self.kappa);
         for (k, lq) in &self.min_log_q {
-            println!("    kappa = {:<3} requires log q >= {:.1}", k, lq);
+            println!("    κ = {:<3} requires log q >= {:.1}", k, lq);
         }
         println!("\n=== Communication per query (client -> server) ===");
-        println!("  1 ring element = N*ceil(log q/8) = {} B", self.ring_elem_bytes);
+        println!("  1 ring element = N·⌈log q/8⌉ = {} B", self.ring_elem_bytes);
         println!("  C_x   {:>3} ring elements = {:>8.2} KB", self.ell, kb(self.c_x_bytes));
         println!(
             "  c_r   {:>3} ring elements = {:>8.2} KB   <- decision B1 (no preprocessing) => sent online",
@@ -260,7 +253,7 @@ impl ParamReport {
             kb(self.c_r_bytes)
         );
         println!(
-            "  d_x   {:>3} ring elements = {:>8.2} KB   (if committing to x's {} bits instead: {:.2} KB)",
+            "  d_x   {:>3} ring elements = {:>8.2} KB   (if committing to the {} bits of x instead: {:.2} KB)",
             self.d_x_bytes / self.ring_elem_bytes,
             kb(self.d_x_bytes),
             self.n_bits,
@@ -274,14 +267,14 @@ impl ParamReport {
             kb(self.pcs_unbatched_bytes)
         );
         println!(
-            "    ZK mask folded into the linear opening of c_t; a separate fourth commitment would cost {:.2} KB more",
+            "    └ ZK masks folded into the linear opening of c_w; a separate fourth commitment would cost {:.2} KB more",
             kb(self.pcs_mask_own_commitment_bytes)
         );
-        println!("  NOTE: for the sumcheck transcript size see the `proof size` line (measured locally)");
+        println!("  ⚠️ see the `proof size` line for the sumcheck transcript size (measured locally)");
         println!(
-            "\n  Compare LeOPaRd Table 4 (d=64, h=1, beta_r=1): client online 9.59-58.75 KB (w/o NIZK)"
+            "\n  Compare LeOPaRd Table 4 (d=64, h=1, β_r=1): client online 9.59-58.75 KB (w/o NIZK)"
         );
-        println!("  + NIZK estimate 45 KB (their own LaBRADOR+LNP22 estimate)");
+        println!("  + NIZK estimated at 45 KB (their LaBRADOR+LNP22 estimate)");
     }
 }
 
@@ -304,18 +297,25 @@ mod tests {
             );
             let r = report(&params, &nz, 2, 1);
             let groups = crate::hash::bits_to_groups(&params, &vec![false; n]);
-            let h_cells = g_pad(&params) * params.table_size();
-            let mut hb = vec![false; h_cells];
-            for (i, &v) in groups.iter().enumerate() {
-                hb[i * params.table_size() + v] = true;
-            }
-            let bw = crate::nizk1::sample_blind(&crate::rng::insecure_test_secret(702), 0, &nz, &hb);
+            let bw = crate::nizk1::sample_blind(
+                crate::nizk1::QueryTicket::insecure_for_tests(
+                    crate::rng::insecure_test_secret(702),
+                    0,
+                ),
+                &params,
+                &nz,
+                &groups,
+            );
             let (st, proof) = crate::proof::prove_nizk1(&params, &nz, &groups, &bw);
             assert!(crate::proof::verify_nizk1(&params, &nz, &st, &proof));
             assert_eq!(r.nv_w, proof.c_w.num_vars, "nv_w  (n={n} g={g} ell={ell})");
-            assert_eq!(r.nv_h, proof.c_h.num_vars, "nv_h  (n={n} g={g} ell={ell})");
+            assert_eq!(
+                r.nv_h,
+                proof.sc5_onehot.rounds.len() + g,
+                "nv_h  (n={n} g={g} ell={ell})"
+            );
             assert_eq!(r.nv_t, proof.c_t.num_vars, "nv_t  (n={n} g={g} ell={ell})");
-            assert_eq!(r.nv_u, proof.sc1_bilinear.rounds.len(), "nv_u");
+            assert_eq!(r.nv_u + 1, proof.sc1_bilinear.rounds.len(), "nv_u");
             assert_eq!(r.statement_bytes, r.c_x_bytes + r.c_r_bytes + r.d_x_bytes);
         }
     }
@@ -331,9 +331,6 @@ mod tests {
             r.lattice.shortfall(),
             r.lattice.target
         );
-        #[cfg(feature = "q32")]
-        let want = 1274.0;
-        #[cfg(feature = "q64")]
         let want = 2509.0;
         let t = min_lattice_dim(crate::field::Q, SIGMA, TARGET_DELTA0);
         assert!((t - want).abs() < 2.0, "the closed form for the target dimension drifted: {t} (expected {want})");
@@ -352,12 +349,9 @@ mod tests {
         let r = report(&params, &nz, 2, 1);
         let base = (r.n_ring as f64 * (2.0 * r.bf + 1.0) * r.p_round as f64).log2();
         for (k, lq) in &r.min_log_q {
-            assert!((lq - base - *k as f64).abs() < 1e-9, "the inverse solve for kappa={k} is inconsistent");
+            assert!((lq - base - *k as f64).abs() < 1e-9, "the inverse solve for κ={k} is inconsistent");
         }
-        #[cfg(feature = "q32")]
-        let (lo, hi) = (9.0, 10.0);
-        #[cfg(feature = "q64")]
         let (lo, hi) = (40.0, 41.0);
-        assert!(r.kappa > lo && r.kappa < hi, "kappa = {} outside the expected range ({lo}, {hi})", r.kappa);
+        assert!(r.kappa > lo && r.kappa < hi, "κ = {} is outside the expected range ({lo}, {hi})", r.kappa);
     }
 }

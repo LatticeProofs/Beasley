@@ -3,9 +3,6 @@ use crate::ring::{RingElem, GADGET_LEN, N};
 use crate::aesprg::AesPrg;
 use rayon::prelude::*;
 
-#[cfg(feature = "q32")]
-pub const ELL: usize = 3;
-#[cfg(feature = "q64")]
 pub const ELL: usize = 5;
 
 pub const fn ml_of(ell: usize) -> usize {
@@ -67,6 +64,19 @@ impl HashParams {
     pub fn a(&self, v: usize, r: usize, d: usize) -> &RingElem {
         debug_assert!(r < self.ell && d < self.ml());
         &self.table[v][r * self.ml() + d]
+    }
+
+    #[cfg(test)]
+    pub fn dims_only(n_bits: usize, group_bits: usize, ell: usize) -> Self {
+        assert!(n_bits % group_bits == 0 && n_bits / group_bits >= 2 && ell >= 1);
+        HashParams {
+            n_bits,
+            group_bits,
+            ell,
+            table: vec![Vec::new(); 1usize << group_bits],
+            spectra_cache: None,
+            crs_digest: crs_digest(0, n_bits, group_bits, ell),
+        }
     }
 
     pub fn precompute_spectra(&mut self) {
@@ -152,7 +162,7 @@ mod tests {
         assert!(p.table.iter().all(|r| r.len() == p.ell * p.ml()));
         for a in 0..p.table_size() {
             for b in (a + 1)..p.table_size() {
-                assert_ne!(p.table[a], p.table[b], "matrix {a} and matrix {b} are identical");
+                assert_ne!(p.table[a], p.table[b], "matrix {a} is identical to matrix {b}");
             }
         }
         let half = 4usize;
@@ -185,7 +195,7 @@ mod tests {
         assert_ne!(a.crs_digest, c.crs_digest);
         let d = HashParams::sample(7, 8, 4, 2);
         assert_ne!(a.crs_digest, d.crs_digest);
-        assert_ne!(a.table, d.table, "ell is part of the sampling domain too");
+        assert_ne!(a.table, d.table, "ell is part of the sampling domain");
     }
 
     #[test]
@@ -194,13 +204,13 @@ mod tests {
         let b = HashParams::sample(2024, 8, 4, 2);
         let dt = |p: &HashParams| crs_digest_from_table(p.n_bits, p.group_bits, p.ell, &p.table);
 
-        assert_eq!(a.crs_digest, b.crs_digest, "digests for the same seed unexpectedly differ");
-        assert_eq!(a.table, b.table, "the same seed unexpectedly produced different tables -- the premise of the seed-based digest is broken");
-        assert_eq!(dt(&a), dt(&b), "the table-based digest must agree too");
+        assert_eq!(a.crs_digest, b.crs_digest, "digests differ for the same seed");
+        assert_eq!(a.table, b.table, "the same seed produced different tables -- the premise of the seed-based digest is broken");
+        assert_eq!(dt(&a), dt(&b), "the table-based digest must match too");
 
         let c = HashParams::sample(2025, 8, 4, 2);
-        assert_ne!(a.crs_digest, c.crs_digest, "digests for different seeds are unexpectedly identical");
-        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to distinguish CRSs from different seeds");
+        assert_ne!(a.crs_digest, c.crs_digest, "digests are identical for different seeds");
+        assert_ne!(dt(&a), dt(&c), "the table-based digest fails to distinguish CRSs from different seeds");
     }
 
     #[test]

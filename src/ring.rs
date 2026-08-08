@@ -7,25 +7,19 @@ pub const N: usize = 512;
 
 const _: () = assert!(N.is_power_of_two(), "N must be a power of two, otherwise X^N+1 is reducible (P1)");
 
-#[cfg(feature = "q32")]
-pub const DIGIT_BITS: usize = 1;
-#[cfg(feature = "q64")]
 pub const DIGIT_BITS: usize = 8;
 
 pub const GADGET_BASE: u64 = 1 << DIGIT_BITS;
 
 pub const W_RANGE_BASE: u64 = 2;
 
-#[cfg(feature = "q32")]
-pub const M_BIT_ROWS: usize = 32;
-#[cfg(feature = "q64")]
 pub const M_BIT_ROWS: usize = 64;
 
 pub const GADGET_LEN: usize = M_BIT_ROWS / DIGIT_BITS;
 
 const _: () = assert!(
     GADGET_LEN * DIGIT_BITS == M_BIT_ROWS,
-    "DIGIT_BITS must divide M_BIT_ROWS, otherwise the top digit is not full"
+    "DIGIT_BITS must divide M_BIT_ROWS, otherwise the top digit is not fully packed"
 );
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -169,11 +163,11 @@ mod tests {
     #[test]
     fn gadget_constants_are_consistent() {
         assert_eq!(GADGET_BASE, 1u64 << DIGIT_BITS);
-        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "the digit grouping must cover M_BIT_ROWS exactly");
+        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "the digit grouping must exactly cover M_BIT_ROWS");
         assert_eq!(
             M_BIT_ROWS,
             (64 - crate::field::Q.leading_zeros()) as usize,
-            "M_BIT_ROWS must be ceil(log2 q)"
+            "M_BIT_ROWS must be ⌈log₂ q⌉"
         );
         assert_eq!(W_RANGE_BASE, 2, "the W table only ever holds bits");
         assert!(
