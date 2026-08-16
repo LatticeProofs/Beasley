@@ -669,7 +669,7 @@ pub fn prove_batched_w(
     let s_len = apow.len();
     assert_eq!(zw.len(), 1 << nv_w);
     assert_eq!(lg.len() * s_len, 1 << nv_w);
-    assert!(nv_k >= 1 && s_len >= 2, "prove_batched_w requires nv_k >= 1 and s_len >= 2");
+    assert!(nv_k >= 1 && s_len >= 2, "prove_batched_w requires nv_k ≥ 1 and s_len ≥ 2");
 
     let mid = nv_k;
     let eb = eq_table(&tau0[mid..]);
@@ -700,7 +700,7 @@ pub fn prove_batched_w(
         let half = 1usize << (nv_w - 1 - round);
         if round + 1 == nv_w {
             debug_assert_eq!(half, 1);
-            debug_assert!(round >= nv_k, "the final round must be in phase B (s_len >= 2)");
+            debug_assert!(round >= nv_k, "the last round must fall in phase B (s_len ≥ 2)");
             let (w0, dw) = (w[0], w[1] - w[0]);
             let (b0, db) = (b[0], b[1] - b[0]);
             let t = tau0[round];
@@ -1181,7 +1181,7 @@ mod tests {
             assert_eq!(all[0] + all[1], claim_sim, "round {round} g(0)+g(1) != claim");
             let sent: Vec<FqExt> =
                 all.iter().enumerate().filter(|(i, _)| *i != 1).map(|(_, &v)| v).collect();
-            assert_eq!(proof.rounds[round], sent, "round polynomial for round {round}");
+            assert_eq!(proof.rounds[round], sent, "round polynomial at round {round}");
             for &e in &sent {
                 tr_sim.absorb_fq4(e);
             }
@@ -1240,13 +1240,13 @@ mod tests {
         assert_eq!(sim_r, r_v);
         assert_eq!(e_b, sim_final, "e_b vs sim-final (verify folding)");
         assert_eq!(open_w, w_dot, "open_w must be the masked Ẇ(r_w)");
-        assert_ne!(open_w, wb[0], "when σ_W != 0, Ẇ(r_w) must not equal W̃(r_w)");
+        assert_ne!(open_w, wb[0], "Ẇ(r_w) must not equal W̃(r_w) when σ_W ≠ 0");
         assert_eq!(n_at_c, nmask.eval(c), "N(c) is wrong");
         let ind = sim_r[..nv_w].iter().fold(FqExt::ONE, |a, &x| a * (FqExt::ONE - x));
         assert_eq!(
             e_b,
             (FqExt::ONE - c) * main_final + ind * n_at_c,
-            "the closing identity of Libra step (f) does not hold"
+            "the final equation of Libra step (f) does not match"
         );
         let w_at = mle_eval(&w_fq4, &r_v[..nv_w]);
         let lg_at = mle_eval(&lg, &r_v[..nv_k]);
@@ -1292,18 +1292,18 @@ mod tests {
         assert_eq!(
             p1.rounds[0][0] + p1.rounds[0][1],
             claim + msum,
-            "the claim is not shifted by exactly ΣR_B"
+            "claim is not shifted by exactly ΣR_B"
         );
         assert_eq!(p1.rounds.len(), nv + 1);
         assert!(p1.rounds[..nv - 1].iter().all(|x| x.len() == 4));
         assert_eq!(p1.rounds[nv - 1].len(), 7);
-        assert_eq!(p1.rounds[nv].len(), 3, "w round: deg 2 => send 3 values (node 1 is not skipped)");
+        assert_eq!(p1.rounds[nv].len(), 3, "w round: deg 2 ⇒ send 3 values (node 1 is not skipped)");
 
         let rc = &r1[..nv];
         let z = rc.iter().fold(FqExt::ONE, |a, &x| a * x * (FqExt::ONE - x));
         assert_eq!(h1, mle_eval(&h, rc) + z * sh.eval(rc[nv - 1]), "Ḣ(r) is not H̃(r) + Z(r)R_H(z₁)");
         assert_eq!(u1, mle_eval(&u, rc) + z * su, "U̇(r) is not Ũ(r) + Z(r)σ_U");
-        assert_eq!(h0, mle_eval(&h, &r0[..nv]), "with σ=0 it must fall back to the unmasked value");
+        assert_eq!(h0, mle_eval(&h, &r0[..nv]), "must fall back to unmasked when σ=0");
         assert_eq!(u0, mle_eval(&u, &r0[..nv]));
         assert_ne!(h0, h1, "R_H had no effect");
         assert_ne!(u0, u1, "σ_U had no effect");
@@ -1317,10 +1317,10 @@ mod tests {
         assert_eq!(
             e,
             (FqExt::ONE - c) * mle_eval(&eq, rc) * h1 * u1 + ind * rb_at_c,
-            "the closing identity of Libra step (f) does not hold"
+            "the final equation of Libra step (f) does not match"
         );
         let mut tr_w = Transcript::new("bz");
-        assert!(verify_degs(claim, &degs, &p1, &mut tr_w).is_none(), "an unmasked claim was accepted");
+        assert!(verify_degs(claim, &degs, &p1, &mut tr_w).is_none(), "an unmasked claim unexpectedly passed");
     }
 
     #[test]
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(
             e,
             (FqExt::ONE - c) * t_dot * mle_eval(&b, rc) + ind * rq_at_c,
-            "the closing identity does not hold"
+            "the final equation does not match"
         );
         let mut tr_w = Transcript::new("p2s");
         let (ew, rw) = verify_product2(base, &degs, &p, &mut tr_w).expect("well-formed");
@@ -1372,7 +1372,7 @@ mod tests {
             ew,
             (FqExt::ONE - rw[nv]) * tw * mle_eval(&b, rwc)
                 + indw * ClaimMask { coef: &rq }.eval(rw[nv]),
-            "an unmasked claim satisfied the closing identity"
+            "an unmasked claim unexpectedly passed the final equation"
         );
     }
 
@@ -1559,7 +1559,7 @@ mod tests {
         let ap_at = mle_eval(&apow, &r_v[nv_k..nv_w]);
         let expect = (FqExt::ONE - cb)
             * (lambda * lg_at * ap_at * w_at + eq_eval(&tau0, rc) * w_at * (w_at - FqExt::ONE));
-        assert_ne!(e_b, expect, "a non-binary W (cell {bad_cell} = {bad_val}) was accepted by SC3");
+        assert_ne!(e_b, expect, "non-binary W (cell {bad_cell} = {bad_val}) unexpectedly passed SC3");
     }
 
     #[test]

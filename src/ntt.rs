@@ -13,7 +13,7 @@ const _: () = assert!(L.is_power_of_two());
 const _: () = {
     let mut i = 0;
     while i < PRIMES.len() {
-        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support a negacyclic-L NTT");
+        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support the negacyclic-L NTT");
         i += 1;
     }
 };
@@ -45,7 +45,7 @@ fn fwd_into(a: &[Fq], p: u64, plan: &Plan, buf: &mut [u32]) {
 }
 
 fn fwd_small_into(a: &[Fq], plan: &Plan, buf: &mut [u32]) {
-    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digits must be < every RNS prime to skip the % p");
+    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digit must be < every RNS prime so the % p can be skipped");
     buf.fill(0);
     for (i, &v) in a.iter().enumerate() {
         debug_assert!((v.0 as u64) < GADGET_BASE);
@@ -169,13 +169,13 @@ fn crt_modq<const K: usize>(r: [u64; K]) -> Fq {
 }
 
 const _: () = {
-    assert!(M_MOD_Q[0] == 1, "the 0th weight of the mixed-radix basis must be 1");
+    assert!(M_MOD_Q[0] == 1, "the 0th mixed-radix weight must be 1");
     let mut i = 0;
     while i < NPRIMES {
         assert!(PRIMES[i] < Q, "RNS primes must be < q (precondition for the reduction-free 0th term)");
         let mut j = 0;
         while j < NPRIMES {
-            assert!(PRIMES[j] < 2 * PRIMES[i], "primes must be within a factor of 2 of each other (precondition for a single conditional subtraction)");
+            assert!(PRIMES[j] < 2 * PRIMES[i], "primes must be within a factor of 2 of each other (precondition for the single conditional subtraction)");
             j += 1;
         }
         i += 1;
@@ -216,7 +216,7 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
     assert!(cols.len() <= specs.len());
     debug_assert!(
         cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: the right operand coefficients must be gadget digits (< GADGET_BASE) -- the RNS bound for NHOT primes depends on it"
+        "hot-path precondition: the right operand's coefficients must be gadget digits (< GADGET_BASE) -- the RNS bound for NHOT primes depends on this"
     );
 
     let res: Vec<Vec<u32>> = (0..NHOT)
@@ -326,7 +326,7 @@ pub fn neg_and_quotient_rows(
     assert_eq!(specs.len(), rows * ml, "specs must be rows × ml (row-major)");
     debug_assert!(
         cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: the right operand coefficients must be gadget digits (< GADGET_BASE)"
+        "hot-path precondition: the right operand's coefficients must be gadget digits (< GADGET_BASE)"
     );
 
     let res: Vec<Vec<Vec<u32>>> = (0..NHOT)
@@ -440,10 +440,10 @@ mod tests {
     #[test]
     fn ntt_length_is_exactly_2n() {
         assert_eq!(L, 2 * N);
-        assert!(L.is_power_of_two(), "L is not a power of two => tfhe-ntt cannot build a Plan");
+        assert!(L.is_power_of_two(), "L is not a power of two ⇒ tfhe-ntt cannot build a Plan");
         for (i, &p) in PRIMES.iter().enumerate() {
             assert_eq!((p - 1) % (2 * L as u64), 0, "p{i} = {p} does not support negacyclic-{L}");
-            assert!(Plan::try_new(L, p as u32).is_some(), "Plan({L}) for p{i} cannot be built");
+            assert!(Plan::try_new(L, p as u32).is_some(), "cannot build Plan({L}) for p{i}");
         }
     }
 
@@ -506,10 +506,10 @@ mod tests {
         }
         assert_eq!(peak, ml as u128 * dm * qm1 * N as u128);
         let modulus: u128 = (0..NHOT).map(|i| PRIMES[i] as u128).product();
-        assert!(peak < modulus, "the bound for {NHOT} primes is too small: peak = {peak}, Πp = {modulus}");
+        assert!(peak < modulus, "bound for {NHOT} primes is insufficient: peak = {peak}, Πp = {modulus}");
         let bits = 128 - peak.leading_zeros();
         let doc_bits = 87;
-        assert_eq!(bits, doc_bits, "upper bound is not 2^{doc_bits}: got 2^{bits}");
+        assert_eq!(bits, doc_bits, "upper bound is not 2^{doc_bits}: 2^{bits}");
 
         let (neg, t) = neg_and_quotient(&specs, &cols);
         for i in 0..N {
@@ -545,7 +545,7 @@ mod tests {
         let iters = 3000;
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / iters as f64;
 
-        println!("\n--- NTT forward microbenchmark (average of {iters}, single prime; current L = {L}) ---");
+        println!("\n--- NTT forward microbenchmark (avg of {iters} runs, single prime; current L = {L}) ---");
         for len in [512usize, 1024, 2048, 4096] {
             let Some(plan) = Plan::try_new(len, p) else {
                 println!("  L = {len:<5}   (p = {p} does not support negacyclic-{len}, skipped)");
@@ -557,7 +557,7 @@ mod tests {
                 plan.fwd(&mut buf);
             }
             let d = t.elapsed();
-            println!("  L = {len:<5}{:8.3} us{}", per(d), if len == L { "   <- current" } else { "" });
+            println!("  L = {len:<5}{:8.3} us{}", per(d), if len == L { "   ← current" } else { "" });
         }
     }
 
@@ -597,7 +597,7 @@ mod tests {
 
         println!("\n--- inner_full breakdown (delta={GADGET_LEN} columns, right operand is a bit, {NHOT} primes) ---");
         println!(
-            "  to_spectra x {GADGET_LEN} (with {NHOT} primes + Shoup)  {:9.1} us  ({:.1} us each)",
+            "  to_spectra x {GADGET_LEN} ({NHOT} primes + Shoup)  {:9.1} us  ({:.1} us each)",
             t_spec.as_secs_f64() * 1e6,
             t_spec.as_secs_f64() * 1e6 / GADGET_LEN as f64
         );

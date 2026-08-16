@@ -245,7 +245,7 @@ pub fn compute_quotients(
                 ts.push(t);
             }
             CKind::ComRand { which, idx } | CKind::ComMsg { which, idx } => {
-                let q = bq.expect("Phase B quotient not provided");
+                let q = bq.expect("Phase B quotients not provided");
                 let ck = if which == 0 { &nz.unwrap().nz.com_r } else { &nz.unwrap().nz.com_x };
                 let off = if matches!(meta.kind, CKind::ComRand { .. }) { 0 } else { ck.com_n() };
                 let src = if which == 0 { &q.cr } else { &q.dx };
@@ -429,7 +429,7 @@ mod tests {
                 assert_eq!(
                     rows.u_pub(row, v),
                     params.a(v, row.chain, 0).eval(alpha),
-                    "u_pub picked the wrong cell: v={v} chain={}",
+                    "u_pub read the wrong cell: v={v} chain={}",
                     row.chain
                 );
                 checked += 1;
@@ -468,7 +468,7 @@ mod tests {
     fn check_witness_rejects_out_of_range_digit() {
         let (params, groups) = setup(8, 2, 1);
         let (ch, wit) = eval_h(&params, &groups);
-        assert!(check_witness(&params, &ch, &groups, &wit), "an honest witness should pass");
+        assert!(check_witness(&params, &ch, &groups, &wit), "honest witness should pass");
         let mut bad = eval_h(&params, &groups).1;
         bad.m[0][2].c[7] = Fq::new(GADGET_BASE);
         assert!(
@@ -480,7 +480,7 @@ mod tests {
                 .flat_map(|i| wit.column(i))
                 .flat_map(|m| m.c.iter())
                 .any(|c| c.0 as u64 >= 2);
-            assert!(big, "the honest base-{GADGET_BASE} witness has no digit ≥ 2?");
+            assert!(big, "base-{GADGET_BASE} honest witness has no digit ≥ 2");
         }
     }
 

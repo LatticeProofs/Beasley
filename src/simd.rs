@@ -17,6 +17,16 @@ fn use_avx2() -> bool {
     })
 }
 
+#[cfg(target_arch = "x86_64")]
+pub fn avx2_enabled() -> bool {
+    use_avx2()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn avx2_enabled() -> bool {
+    false
+}
+
 #[inline(always)]
 pub fn to_mont(x: Fq) -> u64 {
     x.0
@@ -76,7 +86,7 @@ fn fqext_mul_scalar(a: [u64; EXT_DEG], b: [u64; EXT_DEG]) -> [u64; EXT_DEG] {
     let p11 = mont_mul(a[1], b[1]);
     let p01 = mont_mul(a[0], b[1]);
     let p10 = mont_mul(a[1], b[0]);
-    [subq(p00, p11), addq(p01, p10)]
+    [addq(p00, addq(p11, p11)), addq(p01, p10)]
 }
 
 #[inline(always)]
@@ -112,7 +122,8 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     fn mul_c(x: __m256i) -> __m256i {
-        _mm256_add_epi64(_mm256_slli_epi64(x, 8), x)
+        let t = _mm256_sub_epi64(_mm256_slli_epi64(x, 6), _mm256_slli_epi64(x, 2));
+        _mm256_sub_epi64(t, x)
     }
 
     #[target_feature(enable = "avx2")]
@@ -165,8 +176,9 @@ mod avx2 {
 
     #[target_feature(enable = "avx2")]
     fn ext_mul_v(a: [__m256i; 2], b: [__m256i; 2]) -> [__m256i; 2] {
+        let p11 = mul_v(a[1], b[1]);
         [
-            sub_v(mul_v(a[0], b[0]), mul_v(a[1], b[1])),
+            add_v(mul_v(a[0], b[0]), add_v(p11, p11)),
             add_v(mul_v(a[0], b[1]), mul_v(a[1], b[0])),
         ]
     }
@@ -1224,7 +1236,7 @@ mod tests {
                 batched_phase_a_round_scalar(
                     &w_bits, &apow, &ea, &eb, &lg, cells, s_len, 0, k_len
                 ),
-                "round0 specialization disagrees with the generic round k={k_len} s={s_len}"
+                "the round0 specialization disagrees with the generic round k={k_len} s={s_len}"
             );
         }
     }

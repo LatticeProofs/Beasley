@@ -87,9 +87,9 @@ mod tests {
             let mut r = CsRng::from_parts(d, &[s]);
             (0..8).map(|_| r.next_u64()).collect::<Vec<_>>()
         };
-        assert_eq!(seq("a", &s), seq("a", &s), "the same seed must be deterministic");
-        assert_ne!(seq("a", &s), seq("b", &s), "different domain => different sequence");
-        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seed => different sequence");
+        assert_eq!(seq("a", &s), seq("a", &s), "same seed must be deterministic");
+        assert_ne!(seq("a", &s), seq("b", &s), "different domain ⇒ different sequence");
+        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seed ⇒ different sequence");
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod tests {
             }
         }
         for (p, &c) in per_pos.iter().enumerate() {
-            assert!(c > 800 && c < 1200, "buffer position {p} skewed: {c}/2000");
+            assert!(c > 800 && c < 1200, "buffer position {p} is skewed: {c}/2000");
         }
     }
 

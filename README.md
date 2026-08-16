@@ -1,11 +1,8 @@
+# VOPRF
+
+## Benchmark
 
 ```
-$env:RAYON_NUM_THREADS = 1
-cargo run --release --bin phase_bench 128 8 5 1
-Remove-Item Env:RAYON_NUM_THREADS
+powershell -ExecutionPolicy Bypass -File script/bench_median.ps1
 ```
 
-
-```
-powershell -ExecutionPolicy Bypass -File script/bench_median.ps1 -G 8 -Runs 10
-```

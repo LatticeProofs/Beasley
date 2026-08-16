@@ -162,7 +162,7 @@ mod tests {
         assert!(p.table.iter().all(|r| r.len() == p.ell * p.ml()));
         for a in 0..p.table_size() {
             for b in (a + 1)..p.table_size() {
-                assert_ne!(p.table[a], p.table[b], "matrix {a} is identical to matrix {b}");
+                assert_ne!(p.table[a], p.table[b], "matrix {a} equals matrix {b}");
             }
         }
         let half = 4usize;
@@ -181,7 +181,7 @@ mod tests {
                 combined.push(acc);
             }
         }
-        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would go back to 2)");
+        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would fall back to 2)");
     }
 
     #[test]
@@ -209,8 +209,8 @@ mod tests {
         assert_eq!(dt(&a), dt(&b), "the table-based digest must match too");
 
         let c = HashParams::sample(2025, 8, 4, 2);
-        assert_ne!(a.crs_digest, c.crs_digest, "digests are identical for different seeds");
-        assert_ne!(dt(&a), dt(&c), "the table-based digest fails to distinguish CRSs from different seeds");
+        assert_ne!(a.crs_digest, c.crs_digest, "digests collide for different seeds");
+        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to distinguish CRS from different seeds");
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
         for row in &p.table {
             for e in row {
                 for c in &e.c {
-                    assert!((c.0 as u64) < crate::field::Q, "out of range [0,q)");
+                    assert!((c.0 as u64) < crate::field::Q, "outside [0,q)");
                     if (c.0 as u64) >= crate::field::Q / 2 {
                         hi += 1;
                     }

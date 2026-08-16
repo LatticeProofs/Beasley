@@ -88,7 +88,7 @@ impl Mul for Fq2 {
         let p11 = Fq(reduce128(a1 * b1));
         let p01 = Fq(reduce128(a0 * b1));
         let p10 = Fq(reduce128(a1 * b0));
-        Fq2([p00 - p11, p01 + p10])
+        Fq2([p00 + (p11 + p11), p01 + p10])
     }
 }
 
@@ -143,16 +143,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minus_one_is_nonsquare_so_x2_plus_1_is_irreducible() {
-        assert_eq!(Q % 4, 3);
-        assert_eq!(Fq::new(Q - 1).pow((Q - 1) / 2), Fq::new(Q - 1));
+    fn two_is_nonsquare_so_x2_minus_2_is_irreducible() {
+        assert_eq!(Q % 8, 5);
+        assert_eq!(Fq::new(2).pow((Q - 1) / 2), Fq::new(Q - 1));
+        assert_eq!(Fq::new(Q - 1).pow((Q - 1) / 2), Fq::ONE);
     }
 
     #[test]
-    fn x_squared_is_minus_one() {
-        let x = Fq2([Fq::ZERO, Fq::ONE]);
-        assert_eq!(x * x, Fq2([Fq::new(Q - 1), Fq::ZERO]));
-        assert_eq!(x * x, -Fq2::ONE);
+    fn t_squared_is_two() {
+        let t = Fq2([Fq::ZERO, Fq::ONE]);
+        assert_eq!(t * t, Fq2([Fq::new(2), Fq::ZERO]));
+        for k in 1..64u64 {
+            let a = Fq2([Fq::new(k), Fq::new(k * 7 + 1)]);
+            assert_eq!(a * a.inv(), Fq2::ONE, "k = {k}");
+        }
     }
 
     #[test]
@@ -169,7 +173,7 @@ mod tests {
         let q = Q as u128;
         let naive = |a: Fq2, b: Fq2| {
             let m = |x: Fq, y: Fq| ((x.0 as u128 * y.0 as u128) % q) as u64;
-            let r0 = (m(a.0[0], b.0[0]) as u128 + q - m(a.0[1], b.0[1]) as u128) % q;
+            let r0 = (m(a.0[0], b.0[0]) as u128 + 2 * m(a.0[1], b.0[1]) as u128) % q;
             let r1 = (m(a.0[0], b.0[1]) as u128 + m(a.0[1], b.0[0]) as u128) % q;
             Fq2([Fq(r0 as u64), Fq(r1 as u64)])
         };
@@ -219,7 +223,7 @@ mod tests {
         let got_w = poly_eval_pows(&worst, &wp);
         let want_w =
             worst.iter().zip(&wp).fold(Fq2::ZERO, |acc, (&c, &ap)| acc + c * ap);
-        assert_eq!(got_w, want_w, "unreduced accumulation exceeded its bound");
+        assert_eq!(got_w, want_w, "unreduced accumulator bound overflowed");
     }
 
     #[test]

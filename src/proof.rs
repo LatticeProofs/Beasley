@@ -24,8 +24,8 @@ pub const W_COEF_SLOTS: usize = 1 << W_COEF_VARS;
 pub const T_COEF_VARS: usize = W_COEF_VARS;
 pub const T_COEF_SLOTS: usize = 1 << T_COEF_VARS;
 
-const _: () = assert!(W_COEF_SLOTS == N, "the number of W slots must be exactly N");
-const _: () = assert!(T_COEF_SLOTS == N, "the number of T slots must be exactly N (masking moved to W)");
+const _: () = assert!(W_COEF_SLOTS == N, "W's slot count must be exactly N");
+const _: () = assert!(T_COEF_SLOTS == N, "T's slot count must be exactly N (masks moved into W)");
 
 pub const T_ALPHA_LIMIT: usize = N - 1;
 
@@ -34,7 +34,7 @@ const _: () = assert!(T_ALPHA_LIMIT < T_COEF_SLOTS, "T must leave at least one m
 pub const MASK_COEF_ROWS: usize = 128;
 
 const MASK_FQ_BITS: usize = M_BIT_ROWS;
-const _: () = assert!(W_COEF_SLOTS % MASK_FQ_BITS == 0, "a row must divide evenly into a whole number of F_q elements");
+const _: () = assert!(W_COEF_SLOTS % MASK_FQ_BITS == 0, "a row must divide evenly into whole F_q values");
 
 pub const R_COEFS: usize = 3;
 pub const SIG_COEFS: usize = sumcheck::LIN_MASK_COEFS;
@@ -145,7 +145,7 @@ fn mask_bit(d: &Dims, flat: usize, b: usize) -> usize {
     let idx = flat * MASK_FQ_BITS + b;
     assert!(
         idx < MASK_COEF_ROWS * W_COEF_SLOTS,
-        "the ZK mask coefficients do not fit in the W mask region: {} F_q elements needed, only {} available (increase MASK_COEF_ROWS)",
+        "ZK mask coefficients do not fit in W's mask region: need {} F_q, have only {} (increase MASK_COEF_ROWS)",
         flat + 1,
         MASK_COEF_ROWS * W_COEF_SLOTS / MASK_FQ_BITS
     );
@@ -378,7 +378,7 @@ fn dims(params: &HashParams, nz: Option<&Nizk1Ctx>) -> Dims {
     debug_assert_eq!(hvb, gb);
     debug_assert!(
         c_cells >= g_pad,
-        "c_cells ({c_cells}) < g_pad ({g_pad}) -- the τ_lo slice in omega_eval would go out of bounds"
+        "c_cells ({c_cells}) < g_pad ({g_pad}) -- omega_eval's τ_lo slice would go out of bounds"
     );
     Dims {
         g_pad,
@@ -404,7 +404,7 @@ fn dims(params: &HashParams, nz: Option<&Nizk1Ctx>) -> Dims {
 
 fn put_bits(zw: &mut PackedBits, k: usize, poly: &[Fq]) {
     let acc = poly.iter().fold(0u64, |a, &v| a | v.0 as u64);
-    assert!(acc < W_RANGE_BASE, "W may only hold bits, got a row containing {acc} (did the digit skip its base-2 decomposition? see q64.md §4b)");
+    assert!(acc < W_RANGE_BASE, "W only holds bits, got a row containing {acc} (was the digit's base-2 decomposition skipped?)");
     let base = k * W_COEF_SLOTS;
     for (c, &v) in poly.iter().enumerate() {
         zw.or_bit(base + c, v.0 as u32);
@@ -513,7 +513,7 @@ fn build_w_table(
 ) -> PackedBits {
     let ng = params.num_groups();
     let mut zw = PackedBits::zeros(d.kw_pad * W_COEF_SLOTS);
-    assert_eq!(h_bits.len(), d.h_cells, "h_bits must have length h_cells");
+    assert_eq!(h_bits.len(), d.h_cells, "h_bits length must equal h_cells");
     for (idx, &b) in h_bits.iter().enumerate() {
         if b {
             zw.set(h_slot(d, idx));
@@ -589,7 +589,7 @@ pub(crate) fn prove_impl(
         let blk = &mut wit.m[0][chain * GADGET_LEN..(chain + 1) * GADGET_LEN];
         let v = blk.iter().rev().fold(0u128, |acc, e| (acc << DIGIT_BITS) | e.c[coef].0 as u128);
         let alt = v + crate::field::Q as u128;
-        assert!(alt < 1u128 << M_BIT_ROWS, "coefficient {v} >= 2^{M_BIT_ROWS}−q has no second bit representation");
+        assert!(alt < 1u128 << M_BIT_ROWS, "coefficient {v} ≥ 2^{M_BIT_ROWS}−q has no second bit representation");
         for (dg, e) in blk.iter_mut().enumerate() {
             e.c[coef] = Fq(((alt >> (dg * DIGIT_BITS)) & (GADGET_BASE as u128 - 1)) as _);
         }
@@ -640,7 +640,7 @@ pub(crate) fn prove_impl(
     let ozk: [FqExt; OPENZK_VALS] = std::array::from_fn(|_| mrng.next_fq4());
     let h_bits = build_h_bits(params, groups, sab);
     if let (Some((nz, bw)), Sabotage::None) = (nzin, sab) {
-        assert_eq!(crate::nizk1::pack_h(nz, &h_bits), bw.h_pack, "the H segment of W is out of sync with the message of d_x");
+        assert_eq!(crate::nizk1::pack_h(nz, &h_bits), bw.h_pack, "W's H segment is out of sync with d_x's message");
     }
 
     let mut zw = build_w_table(
@@ -670,7 +670,7 @@ pub(crate) fn prove_impl(
             let base = meta.cell * T_COEF_SLOTS;
             assert!(
                 quotients[idx].len() <= T_ALPHA_LIMIT,
-                "the quotient has {} coefficients, exceeding T_ALPHA_LIMIT = {T_ALPHA_LIMIT} (the last slot is reserved for the ZK mask)",
+                "quotient has {} coefficients, exceeding T_ALPHA_LIMIT = {T_ALPHA_LIMIT} (the last slot is reserved for the ZK mask)",
                 quotients[idx].len()
             );
             for (c, &v) in quotients[idx].iter().enumerate() {
@@ -969,7 +969,7 @@ fn hpack_point(d: &Dims, pt_h: &[FqExt]) -> Vec<FqExt> {
     let nv_hp = d.hpack_rows.trailing_zeros() as usize;
     let nv_per = d.hpack_per.trailing_zeros() as usize;
     debug_assert_eq!(nv_hp + nv_per, d.nv_h, "hpack_rows·hpack_per must equal h_cells");
-    debug_assert_eq!(d.h_row % d.hpack_rows, 0, "the h_pack segment is misaligned => the row prefix is not constant");
+    debug_assert_eq!(d.h_row % d.hpack_rows, 0, "the h_pack segment is unaligned ⇒ the row prefix is not constant");
     let prefix = d.h_row >> nv_hp;
     let mut pt = Vec::with_capacity(d.nv_w);
     for b in (0..nv_k - nv_hp).rev() {
@@ -1234,7 +1234,7 @@ mod tests {
         let bad_v = (groups[0] + 1) % params.table_size();
         let (ch, _, proof, _) =
             prove_impl(&params, &groups, Sabotage::ExtraOneHot { step: 0, v: bad_v }, None);
-        assert!(!verify(&params, &ch, &proof), "a non-1-hot witness passed verification");
+        assert!(!verify(&params, &ch, &proof), "a non-1-hot witness unexpectedly verified");
     }
 
     #[test]
@@ -1248,7 +1248,7 @@ mod tests {
 
         let (ch2, _, proof2, _) =
             prove_impl(&params, &groups, Sabotage::NonCanonicalDigit { chain: 0, coef: 3 }, None);
-        assert_ne!(ch, ch2, "the non-canonical decomposition did not change c_H -- this test has no discriminating power");
+        assert_ne!(ch, ch2, "the non-canonical decomposition did not change c_H -- the test has no discriminating power");
         assert!(
             verify(&params, &ch2, &proof2),
             "(if this starts failing, the canonical constraint has been added -- change this test to assert !verify)"
@@ -1261,7 +1261,7 @@ mod tests {
             let (params, groups) = setup(8, 2, 1, 79 + step as u64);
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::ZeroOneHotRow { step }, None);
-            assert!(!verify(&params, &ch, &proof), "step {step}: zeroing the whole row was accepted");
+            assert!(!verify(&params, &ch, &proof), "step {step}: zeroing the whole row unexpectedly passed");
         }
     }
 
@@ -1272,7 +1272,7 @@ mod tests {
             assert!(row < num_m_rows(&params));
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::FlipMBit { row, coef }, None);
-            assert!(!verify(&params, &ch, &proof), "flipping W({row},{coef}) was accepted");
+            assert!(!verify(&params, &ch, &proof), "flipping W({row},{coef}) unexpectedly passed");
         }
     }
 
@@ -1283,7 +1283,7 @@ mod tests {
         for idx in [0usize, nq - 1] {
             let (ch, _, proof, _) =
                 prove_impl(&params, &groups, Sabotage::WrongQuotient { idx }, None);
-            assert!(!verify(&params, &ch, &proof), "a forged quotient {idx} was accepted");
+            assert!(!verify(&params, &ch, &proof), "forging quotient {idx} unexpectedly passed");
         }
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(301, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongRho { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged ρ was accepted");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forging ρ unexpectedly passed");
     }
 
     #[test]
@@ -1300,17 +1300,17 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(302, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongHpack { idx: 0 }, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged h_pack was accepted");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forging h_pack unexpectedly passed");
     }
 
     #[test]
     fn w_slots_exactly_fill_the_ring() {
-        assert_eq!(W_COEF_SLOTS, N, "a W row must have exactly N slots (otherwise the G10 attack surface returns)");
-        assert_eq!(T_COEF_SLOTS, N, "a T cell must have exactly N slots (masking moved to W)");
+        assert_eq!(W_COEF_SLOTS, N, "W's per-row slot count must be exactly N (otherwise the G10 attack surface returns)");
+        assert_eq!(T_COEF_SLOTS, N, "T's per-cell slot count must be exactly N (masks moved into W)");
     }
 
     #[test]
-    #[should_panic(expected = "W may only hold bits")]
+    #[should_panic(expected = "W only holds bits")]
     fn put_bits_rejects_non_bit() {
         let mut zw = PackedBits::zeros(2 * W_COEF_SLOTS);
         let mut poly = vec![Fq::ZERO; W_COEF_SLOTS];
@@ -1350,7 +1350,7 @@ mod tests {
                 assert_eq!(
                     zw.get(k * W_COEF_SLOTS + c),
                     (v >> k) & 1 == 1,
-                    "bit {k} of coefficient {c} is wrong (the two-layer grouping disagrees with the base-2 expansion)"
+                    "bit {k} of coefficient {c} is wrong (the two-level grouping disagrees with the base-2 expansion)"
                 );
             }
         }
@@ -1361,7 +1361,7 @@ mod tests {
         let (params, nz, groups, bw) = setup_nizk1(303, 8, 2, 1);
         let (_, st, proof, _) =
             prove_impl(&params, &groups, Sabotage::WrongCxBlinding, Some((&nz, &bw)));
-        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "a forged (N1) was accepted");
+        assert!(!verify_nizk1(&params, &nz, &st.unwrap(), &proof), "forging (N1) unexpectedly passed");
     }
 
     #[test]
@@ -1385,7 +1385,7 @@ mod tests {
             Sabotage::WrongQuotient { idx: crate::relation::num_quotients(&params, None) - 1 },
         ] {
             let (ch, _, proof, _) = prove_impl(&params, &groups, sab, None);
-            assert!(!verify(&params, &ch, &proof), "{sab:?} was accepted at ℓ=2");
+            assert!(!verify(&params, &ch, &proof), "{sab:?} unexpectedly passed at ℓ=2");
         }
     }
 
@@ -1443,7 +1443,7 @@ mod tests {
             let r5 = vec![FqExt::ZERO; proof.sc5_onehot.rounds.len()];
             for pt in [half_point(&d, &r5), vec![FqExt::ONE; d.nv_h]] {
                 assert_eq!(pt.len(), d.nv_h);
-                assert_eq!(hpack_point(&d, &pt).len(), proof.c_w.num_vars, "length of hpack_point");
+                assert_eq!(hpack_point(&d, &pt).len(), proof.c_w.num_vars, "hpack_point length");
             }
         }
     }
@@ -1457,7 +1457,7 @@ mod tests {
                 0 => proof.c_w.num_vars += 1,
                 _ => proof.c_t.num_vars += 1,
             }
-            assert!(!verify(&params, &ch, &proof), "commitment {which} was accepted despite a mismatched arity");
+            assert!(!verify(&params, &ch, &proof), "commitment {which} with a mismatched arity unexpectedly passed");
         }
     }
 
@@ -1512,7 +1512,7 @@ mod tests {
 
     #[test]
     fn every_quotient_leaves_the_last_slot_free() {
-        assert!(T_ALPHA_LIMIT >= N - 1 && T_ALPHA_LIMIT <= N, "the α truncation bound is implausible");
+        assert!(T_ALPHA_LIMIT >= N - 1 && T_ALPHA_LIMIT <= N, "the α truncation bound is unreasonable");
         for &(n, g, ell, seed) in &[(8usize, 2usize, 1usize, 610u64), (8, 4, 2, 611), (12, 2, 3, 612)]
         {
             let (params, nz, groups, bw) = setup_nizk1(seed, n, g, ell);
@@ -1528,7 +1528,7 @@ mod tests {
                     assert_eq!(
                         q.len(),
                         N - 1,
-                        "quotient {i} of {tag} has {} coefficients (must be N−1, otherwise the mask would overwrite data)",
+                        "{tag} quotient {i} has {} coefficients (must be N−1, otherwise the mask overwrites data)",
                         q.len()
                     );
                 }
@@ -1590,7 +1590,7 @@ mod tests {
             let mut rng = SimpleRng::new(7);
             let rows = build_rows(&params, &st.c_x, rng.next_fq4(), Some(&ctx));
 
-            assert_eq!(d.hv, d.tsz, "the v dimension of the H cube must be exactly 2^g (the mask half was removed)");
+            assert_eq!(d.hv, d.tsz, "the H cube's v dimension must be exactly 2^g (the mask half was removed)");
             assert_eq!(crate::relation::hv_len(&params), params.table_size());
             assert_eq!(rows.a_base.len(), d.tsz, "a_base must cover the entire v dimension");
             assert_eq!(d.nv_h, d.nv_i + g, "nv_h is out of sync");
@@ -1604,14 +1604,14 @@ mod tests {
             assert_eq!(
                 p,
                 (0..d.g_pad).map(|i| (i < params.num_groups()) as usize).collect::<Vec<_>>(),
-                "the row sums of an honest witness must be 1_{{i<G}}"
+                "the honest witness's row sums must be 1_{{i<G}}"
             );
             let r_i: Vec<FqExt> = (0..d.nv_i).map(|_| rng.next_fq4()).collect();
             let pt = half_point(&d, &r_i);
-            assert_eq!(pt.len(), d.nv_h, "half_point must have length exactly nv_h");
+            assert_eq!(pt.len(), d.nv_h, "half_point length must be exactly nv_h");
             let g_bits = d.tsz.trailing_zeros() as usize;
             let half = FqExt::from_u64(2).inv();
-            assert!(pt[d.nv_i..].iter().all(|&c| c == half), "the tail of half_point must be all ½");
+            assert!(pt[d.nv_i..].iter().all(|&c| c == half), "half_point's tail must be all ½");
             assert_eq!(pt[d.nv_i..].len(), g_bits);
         }
     }
@@ -1642,13 +1642,13 @@ mod tests {
             let rows = build_rows(&params, &st.c_x, rng.next_fq4(), Some(&ctx));
             let d = dims(&params, Some(&ctx));
             let (lo, hi) = (d.w_mask_coef, d.w_mask_coef + MASK_COEF_ROWS);
-            assert!(d.w_mask_coef >= ctx.w.total, "the coefficient region overlaps the witness rows");
+            assert!(d.w_mask_coef >= ctx.w.total, "the coefficient region overlaps witness rows");
             assert!(hi <= d.kw_pad, "the coefficient region overflows kw_pad");
             for row in &rows.lin {
                 for &(k, _) in &row.m_entries {
                     assert!(
                         !(lo..hi).contains(&k),
-                        "constraint {:?} points into the mask coefficient region {k} (this would break soundness)",
+                        "constraint {:?} points into the mask coefficient region {k} (this breaks soundness)",
                         row.kind
                     );
                 }
@@ -1682,7 +1682,7 @@ mod tests {
             assert!(d.w_mask_coef + MASK_COEF_ROWS <= d.kw_pad, "the mask region overflows kw_pad");
             for k in 0..d.w_mask_coef {
                 for c in 0..W_COEF_SLOTS {
-                    assert!(!t.get(k * W_COEF_SLOTS + c), "the mask collides with witness row {k}");
+                    assert!(!t.get(k * W_COEF_SLOTS + c), "mask collides with witness row {k}");
                 }
             }
 
@@ -1694,7 +1694,7 @@ mod tests {
                 assert_eq!(
                     pcs::open_linear_bits(&t, &mask_weights(&d, bases[i], &wt)),
                     expect,
-                    "could not recover the sum of mask {i} (n={n} g={g} ell={ell})"
+                    "mask {i}'s total cannot be recovered (n={n} g={g} ell={ell})"
                 );
                 let r: Vec<FqExt> = (0..nv).map(|_| tau_rng.next_fq4()).collect();
                 for (j, &rj) in r.iter().enumerate() {
@@ -1706,7 +1706,7 @@ mod tests {
                         &mask_weights(&d, bases[i], &sumcheck::Masker::weights_eval(nv, deg, &r))
                     ),
                     ms[i].eval(),
-                    "could not recover g(r) of mask {i}"
+                    "mask {i}'s g(r) cannot be recovered"
                 );
             }
         }
@@ -1742,7 +1742,7 @@ mod tests {
                     saw_per_short = true;
                 }
                 for (idx, &b) in hb.iter().enumerate() {
-                    assert_eq!(h_bit(&zw, &d, idx), b, "bit {idx} of the H segment is at the wrong position");
+                    assert_eq!(h_bit(&zw, &d, idx), b, "bit {idx} of the H segment is misplaced");
                 }
                 for _ in 0..4 {
                     let pt: Vec<FqExt> = (0..d.nv_h).map(|_| rng.next_fq4()).collect();
@@ -1761,7 +1761,7 @@ mod tests {
                 );
             }
         }
-        assert!(saw_per_full && saw_per_short, "not both hpack_per branches were exercised");
+        assert!(saw_per_full && saw_per_short, "both hpack_per branches were not exercised");
     }
 
     fn sweep_one(n: usize, g: usize, ell: usize, seed: u64) {
@@ -1801,7 +1801,7 @@ mod tests {
         }
         for sab in sabs_a {
             let (ch, _, p, _) = prove_impl(&params, &groups, sab, None);
-            assert!(!verify(&params, &ch, &p), "Phase A: {sab:?} was accepted ({tag})");
+            assert!(!verify(&params, &ch, &p), "Phase A: {sab:?} unexpectedly passed ({tag})");
         }
 
         for sab in [
@@ -1815,7 +1815,7 @@ mod tests {
             let (_, st, p, _) = prove_impl(&params, &groups, sab, Some((&nz, &bw)));
             assert!(
                 !verify_nizk1(&params, &nz, &st.expect("Phase B"), &p),
-                "Phase B: {sab:?} was accepted ({tag})"
+                "Phase B: {sab:?} unexpectedly passed ({tag})"
             );
         }
 
@@ -1838,10 +1838,10 @@ mod tests {
         for which in 0..NFIELDS {
             let mut p = prove(&params, &groups).1;
             tweak(&mut p, which);
-            assert!(!verify(&params, &ch, &p), "Phase A: field {which} is not bound ({tag})");
+            assert!(!verify(&params, &ch, &p), "Phase A: field {which} is unbound ({tag})");
             let mut q = prove_nizk1(&params, &nz, &groups, &bw).1;
             tweak(&mut q, which);
-            assert!(!verify_nizk1(&params, &nz, &st, &q), "Phase B: field {which} is not bound ({tag})");
+            assert!(!verify_nizk1(&params, &nz, &st, &q), "Phase B: field {which} is unbound ({tag})");
         }
     }
 
@@ -1891,10 +1891,10 @@ mod tests {
             );
             let ctx = Nizk1Ctx::new(&params, &nz, &st);
             for d in [dims(&params, Some(&ctx)), dims(&params, None)] {
-                assert_eq!(d.hpack_rows * d.hpack_per, d.h_cells, "the shape of the H segment is incomplete");
-                assert!(d.h_row + d.hpack_rows <= d.kw_pad, "the H segment overflows kw_pad => SC3 cannot cover it");
+                assert_eq!(d.hpack_rows * d.hpack_per, d.h_cells, "the H segment's shape is incomplete");
+                assert!(d.h_row + d.hpack_rows <= d.kw_pad, "the H segment overflows kw_pad ⇒ SC3 cannot cover it");
                 for idx in [0, d.h_cells / 2, d.h_cells - 1] {
-                    assert!(h_slot(&d, idx) < d.kw_pad * W_COEF_SLOTS, "cell {idx} of H is outside the cube");
+                    assert!(h_slot(&d, idx) < d.kw_pad * W_COEF_SLOTS, "H cell {idx} lies outside the cube");
                 }
                 assert_eq!(d.nv_w, (d.kw_pad * W_COEF_SLOTS).trailing_zeros() as usize);
             }
@@ -1923,14 +1923,14 @@ mod tests {
                 let shapes = mask_shapes(&d);
                 let mut acc = 0usize;
                 for i in 0..4 {
-                    assert_eq!(bases[i], acc, "the start offset of masker {i} is out of sync");
+                    assert_eq!(bases[i], acc, "masker {i}'s start offset is wrong");
                     acc += EXT_DEG * shapes[i].0 * (shapes[i].1 + 1);
                 }
                 assert_eq!(bases[4], acc, "the open-ZK region does not follow the maskers");
                 let last = openzk_base(&d, OPENZK_VALS - 1) + EXT_DEG - 1;
                 assert!(
                     (last + 1) * MASK_FQ_BITS <= MASK_COEF_ROWS * W_COEF_SLOTS,
-                    "the mask region cannot hold the 12 open-ZK values (increase MASK_COEF_ROWS)"
+                    "the mask region cannot hold open-ZK's 12 values (increase MASK_COEF_ROWS)"
                 );
                 assert_eq!(R_Q, R_B + R_COEFS);
                 assert_eq!(R_U, R_Q + R_COEFS);

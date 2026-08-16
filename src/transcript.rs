@@ -171,7 +171,7 @@ mod tests {
         let all = [by_u64, by_fq, by_fqs, by_fq4];
         for i in 0..4 {
             for j in i + 1..4 {
-                assert_ne!(all[i], all[j], "type {i} collides with type {j}");
+                assert_ne!(all[i], all[j], "tag {i} collides with tag {j}");
             }
         }
         let two = Fq::new(2);
@@ -193,11 +193,11 @@ mod tests {
         let d = t.challenge_fq4();
         let got: Vec<u64> = d.coeffs().iter().map(|c| c.0 as u64).collect();
 
-        let want: Vec<u64> = vec![14664575010480232952, 13599215798014194027];
+        let want: Vec<u64> = vec![6424452980691422170, 16741444548730656994];
 
         assert_eq!(
             got, want,
-            "transcript canonical encoding changed -- this invalidates every existing proof; confirm it is intentional"
+            "the transcript's canonical encoding changed -- this invalidates every existing proof; confirm it is intentional"
         );
     }
 
