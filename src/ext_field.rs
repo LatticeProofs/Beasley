@@ -13,11 +13,6 @@ impl Fq2 {
     pub const ONE: Fq2 = Fq2([Fq(1), Fq(0)]);
 
     #[inline(always)]
-    pub const fn from_coeffs(c: [Fq; EXT_DEG]) -> Self {
-        Fq2(c)
-    }
-
-    #[inline(always)]
     pub fn from_fn(f: impl FnMut(usize) -> Fq) -> Self {
         Fq2(core::array::from_fn(f))
     }
@@ -223,7 +218,7 @@ mod tests {
         let got_w = poly_eval_pows(&worst, &wp);
         let want_w =
             worst.iter().zip(&wp).fold(Fq2::ZERO, |acc, (&c, &ap)| acc + c * ap);
-        assert_eq!(got_w, want_w, "unreduced accumulator bound overflowed");
+        assert_eq!(got_w, want_w, "unreduced accumulator exceeded its bound");
     }
 
     #[test]

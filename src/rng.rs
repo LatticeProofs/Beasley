@@ -87,9 +87,9 @@ mod tests {
             let mut r = CsRng::from_parts(d, &[s]);
             (0..8).map(|_| r.next_u64()).collect::<Vec<_>>()
         };
-        assert_eq!(seq("a", &s), seq("a", &s), "same seed must be deterministic");
-        assert_ne!(seq("a", &s), seq("b", &s), "different domain ⇒ different sequence");
-        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seed ⇒ different sequence");
+        assert_eq!(seq("a", &s), seq("a", &s), "the same seed must be deterministic");
+        assert_ne!(seq("a", &s), seq("b", &s), "different domains => different sequences");
+        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seeds => different sequences");
     }
 
     #[test]
@@ -122,7 +122,7 @@ mod tests {
         let mut r = CsRng::from_parts("b", &[&insecure_test_secret(9)]);
         const N: usize = 64 * 1000;
         let ones = (0..N).filter(|_| r.next_bool()).count();
-        assert!(ones > N * 48 / 100 && ones < N * 52 / 100, "bit imbalance: {ones}/{N}");
+        assert!(ones > N * 48 / 100 && ones < N * 52 / 100, "bits unbalanced: {ones}/{N}");
 
         let mut r = CsRng::from_parts("b2", &[&insecure_test_secret(10)]);
         let mut per_pos = [0usize; 64];

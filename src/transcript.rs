@@ -76,13 +76,6 @@ impl Transcript {
         FqExt::from_fn(|_| self.challenge_fq())
     }
 
-    pub fn challenge_u64(&mut self) -> u64 {
-        self.h.absorb_u32(T_CHAL);
-        let lo = self.h.squeeze_u32() as u64;
-        let hi = self.h.squeeze_u32() as u64;
-        lo | (hi << 32)
-    }
-
     pub fn finalize_digest(&mut self) -> [u8; 32] {
         let mut out = [0u8; 32];
         self.h.squeeze(&mut out);
@@ -171,7 +164,7 @@ mod tests {
         let all = [by_u64, by_fq, by_fqs, by_fq4];
         for i in 0..4 {
             for j in i + 1..4 {
-                assert_ne!(all[i], all[j], "tag {i} collides with tag {j}");
+                assert_ne!(all[i], all[j], "types {i} and {j} collide");
             }
         }
         let two = Fq::new(2);
@@ -197,7 +190,7 @@ mod tests {
 
         assert_eq!(
             got, want,
-            "the transcript's canonical encoding changed -- this invalidates every existing proof; confirm it is intentional"
+            "the canonical encoding of the transcript changed -- this invalidates every existing proof, confirm that it is intentional"
         );
     }
 

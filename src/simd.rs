@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 const QN: u64 = Q;
 
-const MONT_ONE: u64 = 1;
+const RAW_ONE: u64 = 1;
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -17,27 +17,17 @@ fn use_avx2() -> bool {
     })
 }
 
-#[cfg(target_arch = "x86_64")]
-pub fn avx2_enabled() -> bool {
-    use_avx2()
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-pub fn avx2_enabled() -> bool {
-    false
-}
-
 #[inline(always)]
-pub fn to_mont(x: Fq) -> u64 {
+fn to_raw(x: Fq) -> u64 {
     x.0
 }
 #[inline(always)]
-pub fn from_mont(x: u64) -> Fq {
-    debug_assert!(x < QN, "from_mont received a non-canonical value");
+fn from_raw(x: u64) -> Fq {
+    debug_assert!(x < QN, "from_raw got a non-canonical value");
     Fq(x)
 }
 #[inline(always)]
-fn mont_mul(a: u64, b: u64) -> u64 {
+fn fq_mul(a: u64, b: u64) -> u64 {
     reduce128((a as u128) * (b as u128))
 }
 #[inline(always)]
@@ -66,12 +56,12 @@ impl SoaFqExt {
     pub fn from_aos(v: &[FqExt]) -> Self {
         let mut c: [Vec<u64>; EXT_DEG] = Default::default();
         for (k, arr) in c.iter_mut().enumerate() {
-            *arr = v.iter().map(|e| to_mont(e.0[k])).collect();
+            *arr = v.iter().map(|e| to_raw(e.0[k])).collect();
         }
         SoaFqExt { c }
     }
     pub fn get(&self, i: usize) -> FqExt {
-        Fq2(core::array::from_fn(|k| from_mont(self.c[k][i])))
+        Fq2(core::array::from_fn(|k| from_raw(self.c[k][i])))
     }
     pub fn truncate(&mut self, n: usize) {
         for arr in self.c.iter_mut() {
@@ -82,23 +72,23 @@ impl SoaFqExt {
 
 #[inline(always)]
 fn fqext_mul_scalar(a: [u64; EXT_DEG], b: [u64; EXT_DEG]) -> [u64; EXT_DEG] {
-    let p00 = mont_mul(a[0], b[0]);
-    let p11 = mont_mul(a[1], b[1]);
-    let p01 = mont_mul(a[0], b[1]);
-    let p10 = mont_mul(a[1], b[0]);
+    let p00 = fq_mul(a[0], b[0]);
+    let p11 = fq_mul(a[1], b[1]);
+    let p01 = fq_mul(a[0], b[1]);
+    let p10 = fq_mul(a[1], b[0]);
     [addq(p00, addq(p11, p11)), addq(p01, p10)]
 }
 
 #[inline(always)]
 fn to_ext(a: [u64; EXT_DEG]) -> FqExt {
-    Fq2(core::array::from_fn(|k| from_mont(a[k])))
+    Fq2(core::array::from_fn(|k| from_raw(a[k])))
 }
 
 #[cfg(target_arch = "x86_64")]
 mod avx2 {
     #![allow(unsafe_op_in_unsafe_fn)]
 
-    use super::{addq, subq, EXT_DEG, MONT_ONE};
+    use super::{addq, subq, EXT_DEG, RAW_ONE};
     use crate::bits::PackedBits;
     use crate::ext_field::FqExt;
     use crate::field::{C, Q};
@@ -240,7 +230,7 @@ mod avx2 {
         let half_k = lg.len() / 2;
         let mut gf2 = [FqExt::ZERO; 3];
         let mut q3 = [FqExt::ZERO; 3];
-        let one = _mm256_set1_epi64x(MONT_ONE as i64);
+        let one = _mm256_set1_epi64x(RAW_ONE as i64);
         let n4 = s_len & !3;
 
         for k in k_lo..k_hi {
@@ -306,7 +296,7 @@ mod avx2 {
                 }
                 for (xi, wv) in [lo, w2, w3].into_iter().enumerate() {
                     let mut wm1 = wv;
-                    wm1[0] = subq(wv[0], MONT_ONE);
+                    wm1[0] = subq(wv[0], RAW_ONE);
                     let f3 = super::fqext_mul_scalar(ebl, super::fqext_mul_scalar(wv, wm1));
                     for j in 0..EXT_DEG {
                         qks[xi][j] = addq(qks[xi][j], f3[j]);
@@ -431,109 +421,6 @@ mod avx2 {
         (gf2, q3)
     }
 
-    #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn bitcheck_evals_split(
-        ext: &super::SoaFqExt,
-        ea: &super::SoaFqExt,
-        eb: &super::SoaFqExt,
-        half: usize,
-    ) -> (FqExt, FqExt) {
-        let eb_n = eb.len();
-        let one = _mm256_set1_epi64x(MONT_ONE as i64);
-        let mut h0 = [_mm256_setzero_si256(); EXT_DEG];
-        let mut h2 = [_mm256_setzero_si256(); EXT_DEG];
-        let n4 = eb_n & !3;
-        let mut s0 = [0u64; EXT_DEG];
-        let mut s2 = [0u64; EXT_DEG];
-
-        for hi_i in 0..ea.len() {
-            let ea_v = [
-                _mm256_set1_epi64x(ea.c[0][hi_i] as i64),
-                _mm256_set1_epi64x(ea.c[1][hi_i] as i64),
-            ];
-            let base = hi_i * eb_n;
-            for lo_i in (0..n4).step_by(4) {
-                let cell = base + lo_i;
-                let eq = ext_mul_v(ea_v, [load(&eb.c[0], lo_i), load(&eb.c[1], lo_i)]);
-                let el = [load(&ext.c[0], cell), load(&ext.c[1], cell)];
-                let eh = [load(&ext.c[0], cell + half), load(&ext.c[1], cell + half)];
-                let z2 = [
-                    add_v(eh[0], sub_v(eh[0], el[0])),
-                    add_v(eh[1], sub_v(eh[1], el[1])),
-                ];
-                let t0 = ext_mul_v(eq, ext_mul_v(el, [sub_v(el[0], one), el[1]]));
-                let t2 = ext_mul_v(eq, ext_mul_v(z2, [sub_v(z2[0], one), z2[1]]));
-                for k in 0..EXT_DEG {
-                    h0[k] = add_v(h0[k], t0[k]);
-                    h2[k] = add_v(h2[k], t2[k]);
-                }
-            }
-            for lo_i in n4..eb_n {
-                let cell = base + lo_i;
-                let eq = super::fqext_mul_scalar(
-                    core::array::from_fn(|k| ea.c[k][hi_i]),
-                    core::array::from_fn(|k| eb.c[k][lo_i]),
-                );
-                let el: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][cell]);
-                let eh: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][cell + half]);
-                let (t0, t2) = super::tail_bit_terms(el, eh, eq);
-                for k in 0..EXT_DEG {
-                    s0[k] = addq(s0[k], t0[k]);
-                    s2[k] = addq(s2[k], t2[k]);
-                }
-            }
-        }
-        for k in 0..EXT_DEG {
-            s0[k] = addq(s0[k], hsum(h0[k]));
-            s2[k] = addq(s2[k], hsum(h2[k]));
-        }
-        (super::to_ext(s0), super::to_ext(s2))
-    }
-
-    #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn bitcheck_evals(
-        ext: &super::SoaFqExt,
-        eqsuf: &super::SoaFqExt,
-        half: usize,
-    ) -> (FqExt, FqExt) {
-        let one = _mm256_set1_epi64x(MONT_ONE as i64);
-        let mut h0 = [_mm256_setzero_si256(); EXT_DEG];
-        let mut h2 = [_mm256_setzero_si256(); EXT_DEG];
-        let n4 = half & !3;
-        let mut s0 = [0u64; EXT_DEG];
-        let mut s2 = [0u64; EXT_DEG];
-        for i in (0..n4).step_by(4) {
-            let el = [load(&ext.c[0], i), load(&ext.c[1], i)];
-            let eh = [load(&ext.c[0], i + half), load(&ext.c[1], i + half)];
-            let eq = [load(&eqsuf.c[0], i), load(&eqsuf.c[1], i)];
-            let z2 = [
-                add_v(eh[0], sub_v(eh[0], el[0])),
-                add_v(eh[1], sub_v(eh[1], el[1])),
-            ];
-            let t0 = ext_mul_v(eq, ext_mul_v(el, [sub_v(el[0], one), el[1]]));
-            let t2 = ext_mul_v(eq, ext_mul_v(z2, [sub_v(z2[0], one), z2[1]]));
-            for k in 0..EXT_DEG {
-                h0[k] = add_v(h0[k], t0[k]);
-                h2[k] = add_v(h2[k], t2[k]);
-            }
-        }
-        for i in n4..half {
-            let lo: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i]);
-            let hi: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i + half]);
-            let eq: [u64; EXT_DEG] = core::array::from_fn(|k| eqsuf.c[k][i]);
-            let (t0, t2) = super::tail_bit_terms(lo, hi, eq);
-            for k in 0..EXT_DEG {
-                s0[k] = addq(s0[k], t0[k]);
-                s2[k] = addq(s2[k], t2[k]);
-            }
-        }
-        for k in 0..EXT_DEG {
-            s0[k] = addq(s0[k], hsum(h0[k]));
-            s2[k] = addq(s2[k], hsum(h2[k]));
-        }
-        (super::to_ext(s0), super::to_ext(s2))
-    }
-
     #[cfg(test)]
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn prim_probe(op: u8, a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
@@ -548,112 +435,6 @@ mod avx2 {
         _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, r);
         out
     }
-}
-
-pub fn eq_table_mont(tau: &[FqExt]) -> SoaFqExt {
-    let mut aos: Vec<[u64; EXT_DEG]> = vec![core::array::from_fn(|k| if k == 0 { MONT_ONE } else { 0 })];
-    for t in tau.iter().rev() {
-        let tm: [u64; EXT_DEG] = core::array::from_fn(|k| to_mont(t.0[k]));
-        let one_minus: [u64; EXT_DEG] =
-            core::array::from_fn(|k| if k == 0 { subq(MONT_ONE, tm[0]) } else { subq(0, tm[k]) });
-        let mut next = Vec::with_capacity(aos.len() * 2);
-        for &v in &aos {
-            next.push(fqext_mul_scalar(v, one_minus));
-        }
-        for &v in &aos {
-            next.push(fqext_mul_scalar(v, tm));
-        }
-        aos = next;
-    }
-    let mut c: [Vec<u64>; EXT_DEG] = Default::default();
-    for (k, arr) in c.iter_mut().enumerate() {
-        *arr = aos.iter().map(|v| v[k]).collect();
-    }
-    SoaFqExt { c }
-}
-
-#[inline(always)]
-fn tail_bit_terms(
-    lo: [u64; EXT_DEG],
-    hi: [u64; EXT_DEG],
-    eq: [u64; EXT_DEG],
-) -> ([u64; EXT_DEG], [u64; EXT_DEG]) {
-    let z2: [u64; EXT_DEG] = core::array::from_fn(|k| addq(hi[k], subq(hi[k], lo[k])));
-    let mut lo_m1 = lo;
-    lo_m1[0] = subq(lo[0], MONT_ONE);
-    let mut z2_m1 = z2;
-    z2_m1[0] = subq(z2[0], MONT_ONE);
-    (
-        fqext_mul_scalar(eq, fqext_mul_scalar(lo, lo_m1)),
-        fqext_mul_scalar(eq, fqext_mul_scalar(z2, z2_m1)),
-    )
-}
-
-pub fn bitcheck_evals(ext: &SoaFqExt, eqsuf: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if use_avx2() {
-            return unsafe { avx2::bitcheck_evals(ext, eqsuf, half) };
-        }
-    }
-    bitcheck_evals_scalar(ext, eqsuf, half)
-}
-
-pub fn bitcheck_evals_split(
-    ext: &SoaFqExt,
-    ea: &SoaFqExt,
-    eb: &SoaFqExt,
-    half: usize,
-) -> (FqExt, FqExt) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if use_avx2() {
-            return unsafe { avx2::bitcheck_evals_split(ext, ea, eb, half) };
-        }
-    }
-    bitcheck_evals_split_scalar(ext, ea, eb, half)
-}
-
-pub fn bitcheck_evals_split_scalar(
-    ext: &SoaFqExt,
-    ea: &SoaFqExt,
-    eb: &SoaFqExt,
-    half: usize,
-) -> (FqExt, FqExt) {
-    let eb_n = eb.len();
-    let mut h0 = [0u64; EXT_DEG];
-    let mut h2 = [0u64; EXT_DEG];
-    for hi_i in 0..ea.len() {
-        let ea_v: [u64; EXT_DEG] = core::array::from_fn(|k| ea.c[k][hi_i]);
-        for lo_i in 0..eb_n {
-            let cell = hi_i * eb_n + lo_i;
-            let eq = fqext_mul_scalar(ea_v, core::array::from_fn(|k| eb.c[k][lo_i]));
-            let el: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][cell]);
-            let eh: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][cell + half]);
-            let (t0, t2) = tail_bit_terms(el, eh, eq);
-            for k in 0..EXT_DEG {
-                h0[k] = addq(h0[k], t0[k]);
-                h2[k] = addq(h2[k], t2[k]);
-            }
-        }
-    }
-    (to_ext(h0), to_ext(h2))
-}
-
-pub fn bitcheck_evals_scalar(ext: &SoaFqExt, eqsuf: &SoaFqExt, half: usize) -> (FqExt, FqExt) {
-    let mut h0 = [0u64; EXT_DEG];
-    let mut h2 = [0u64; EXT_DEG];
-    for i in 0..half {
-        let lo: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i]);
-        let hi: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i + half]);
-        let eq: [u64; EXT_DEG] = core::array::from_fn(|k| eqsuf.c[k][i]);
-        let (t0, t2) = tail_bit_terms(lo, hi, eq);
-        for k in 0..EXT_DEG {
-            h0[k] = addq(h0[k], t0[k]);
-            h2[k] = addq(h2[k], t2[k]);
-        }
-    }
-    (to_ext(h0), to_ext(h2))
 }
 
 #[inline]
@@ -744,7 +525,7 @@ pub fn batched_phase_a_round_scalar(
             }
             for (xi, wv) in [lo, w2, w3].into_iter().enumerate() {
                 let mut wm1 = wv;
-                wm1[0] = subq(wv[0], MONT_ONE);
+                wm1[0] = subq(wv[0], RAW_ONE);
                 let p = fqext_mul_scalar(wv, wm1);
                 let f3 = fqext_mul_scalar(ebl, p);
                 for j in 0..EXT_DEG {
@@ -799,7 +580,7 @@ pub fn fold_bits_to_soa(zw: &PackedBits, half: usize, r: FqExt) -> SoaFqExt {
             .into_par_iter()
             .map(|cell| {
                 let idx = ((zw.get(cell) as usize) << 1) | zw.get(cell + half) as usize;
-                to_mont(lut[idx].0[k])
+                to_raw(lut[idx].0[k])
             })
             .collect();
     });
@@ -828,16 +609,16 @@ pub fn batched_phase_a_round0_scalar(
         let mut qk = [[0u64; EXT_DEG]; 3];
         for l in 0..s_len {
             let cell = k * s_len + l;
-            let lo = if zw.get(cell) { MONT_ONE } else { 0 };
-            let hi = if zw.get(cell + half) { MONT_ONE } else { 0 };
+            let lo = if zw.get(cell) { RAW_ONE } else { 0 };
+            let hi = if zw.get(cell + half) { RAW_ONE } else { 0 };
             let d = subq(hi, lo);
             let w2 = addq(hi, d);
             let w3 = addq(w2, d);
             let ap = getm(apow, l);
             let ebl = getm(eb, l);
             for j in 0..EXT_DEG {
-                let f2_0 = mont_mul(ap[j], lo);
-                let f2_i = mont_mul(ap[j], d);
+                let f2_0 = fq_mul(ap[j], lo);
+                let f2_i = fq_mul(ap[j], d);
                 let f2_2 = addq(f2_0, addq(f2_i, f2_i));
                 let f2_3 = addq(f2_2, f2_i);
                 rd[0][j] = addq(rd[0][j], f2_0);
@@ -845,9 +626,9 @@ pub fn batched_phase_a_round0_scalar(
                 rd[2][j] = addq(rd[2][j], f2_3);
             }
             for (xi, wx) in [lo, w2, w3].into_iter().enumerate() {
-                let p = mont_mul(wx, subq(wx, MONT_ONE));
+                let p = fq_mul(wx, subq(wx, RAW_ONE));
                 for j in 0..EXT_DEG {
-                    qk[xi][j] = addq(qk[xi][j], mont_mul(ebl[j], p));
+                    qk[xi][j] = addq(qk[xi][j], fq_mul(ebl[j], p));
                 }
             }
         }
@@ -864,7 +645,7 @@ pub fn batched_phase_a_round0_scalar(
 }
 
 pub fn fold(ext: &mut SoaFqExt, half: usize, r: FqExt) {
-    let rm: [u64; EXT_DEG] = core::array::from_fn(|k| to_mont(r.0[k]));
+    let rm: [u64; EXT_DEG] = core::array::from_fn(|k| to_raw(r.0[k]));
     #[cfg(target_arch = "x86_64")]
     {
         if use_avx2() {
@@ -875,7 +656,7 @@ pub fn fold(ext: &mut SoaFqExt, half: usize, r: FqExt) {
     fold_scalar(ext, half, rm);
 }
 
-pub fn fold_scalar(ext: &mut SoaFqExt, half: usize, rm: [u64; EXT_DEG]) {
+fn fold_scalar(ext: &mut SoaFqExt, half: usize, rm: [u64; EXT_DEG]) {
     for i in 0..half {
         let lo: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i]);
         let hi: [u64; EXT_DEG] = core::array::from_fn(|k| ext.c[k][i + half]);
@@ -891,7 +672,7 @@ pub fn fold_scalar(ext: &mut SoaFqExt, half: usize, rm: [u64; EXT_DEG]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mle::{eq_table, mle_eval};
+    use crate::mle::mle_eval;
     use crate::transcript::SimpleRng;
 
     fn rand_ext(rng: &mut SimpleRng) -> FqExt {
@@ -900,13 +681,13 @@ mod tests {
 
     #[test]
     fn plain_form_roundtrip_and_mul() {
-        assert_eq!(MONT_ONE, to_mont(Fq::ONE));
+        assert_eq!(RAW_ONE, to_raw(Fq::ONE));
         let mut rng = SimpleRng::new(1);
         for _ in 0..5000 {
             let a = rng.next_fq();
             let b = rng.next_fq();
-            assert_eq!(from_mont(to_mont(a)), a);
-            assert_eq!(from_mont(mont_mul(to_mont(a), to_mont(b))), a * b);
+            assert_eq!(from_raw(to_raw(a)), a);
+            assert_eq!(from_raw(fq_mul(to_raw(a), to_raw(b))), a * b);
         }
     }
 
@@ -937,20 +718,6 @@ mod tests {
                 core::array::from_fn(|k| b.0[k].0),
             );
             assert_eq!(to_ext(got), a * b);
-        }
-    }
-
-    #[test]
-    fn eq_table_mont_matches_mle() {
-        let mut rng = SimpleRng::new(3);
-        for nv in [1usize, 3, 6] {
-            let tau: Vec<FqExt> = (0..nv).map(|_| rand_ext(&mut rng)).collect();
-            let soa = eq_table_mont(&tau);
-            let want = eq_table(&tau);
-            assert_eq!(soa.len(), want.len());
-            for i in 0..want.len() {
-                assert_eq!(soa.get(i), want[i], "cell {i}");
-            }
         }
     }
 
@@ -990,50 +757,6 @@ mod tests {
         for i in 0..half {
             assert_eq!(got.get(i), want.get(i), "cell {i}");
         }
-    }
-
-    #[test]
-    fn bitcheck_evals_matches_definition() {
-        let mut rng = SimpleRng::new(6);
-        let nv = 8;
-        let len = 1usize << nv;
-        let ext: Vec<FqExt> = (0..len).map(|_| rand_ext(&mut rng)).collect();
-        let eqs: Vec<FqExt> = (0..len / 2).map(|_| rand_ext(&mut rng)).collect();
-        let soa = SoaFqExt::from_aos(&ext);
-        let eqsuf = SoaFqExt::from_aos(&eqs);
-        let half = len / 2;
-        let (h0, h2) = bitcheck_evals(&soa, &eqsuf, half);
-        let mut w0 = FqExt::ZERO;
-        let mut w2 = FqExt::ZERO;
-        for i in 0..half {
-            let (lo, hi) = (ext[i], ext[i + half]);
-            let z2 = hi + (hi - lo);
-            w0 = w0 + eqs[i] * lo * (lo - FqExt::ONE);
-            w2 = w2 + eqs[i] * z2 * (z2 - FqExt::ONE);
-        }
-        assert_eq!(h0, w0);
-        assert_eq!(h2, w2);
-    }
-
-    #[test]
-    fn bitcheck_split_matches_flat() {
-        let mut rng = SimpleRng::new(8);
-        let (na, nb) = (3usize, 4usize);
-        let nv = na + nb;
-        let len = 1usize << (nv + 1);
-        let ext: Vec<FqExt> = (0..len).map(|_| rand_ext(&mut rng)).collect();
-        let ta: Vec<FqExt> = (0..na).map(|_| rand_ext(&mut rng)).collect();
-        let tb: Vec<FqExt> = (0..nb).map(|_| rand_ext(&mut rng)).collect();
-        let ea = eq_table_mont(&ta);
-        let eb = eq_table_mont(&tb);
-        let flat: Vec<FqExt> = (0..1 << nv)
-            .map(|i| ea.get(i >> nb) * eb.get(i & ((1 << nb) - 1)))
-            .collect();
-        let soa = SoaFqExt::from_aos(&ext);
-        let half = len / 2;
-        let a = bitcheck_evals_split(&soa, &ea, &eb, half);
-        let b = bitcheck_evals(&soa, &SoaFqExt::from_aos(&flat), half);
-        assert_eq!(a, b);
     }
 
     #[test]
@@ -1128,7 +851,7 @@ mod tests {
             for i in 0..4 {
                 assert_eq!(got_add[i], addq(a[i], b[i]), "add_v: a={} b={}", a[i], b[i]);
                 assert_eq!(got_sub[i], subq(a[i], b[i]), "sub_v: a={} b={}", a[i], b[i]);
-                assert_eq!(got_mul[i], mont_mul(a[i], b[i]), "mul_v: a={} b={}", a[i], b[i]);
+                assert_eq!(got_mul[i], fq_mul(a[i], b[i]), "mul_v: a={} b={}", a[i], b[i]);
                 assert!(got_add[i] < Q && got_sub[i] < Q && got_mul[i] < Q);
             }
         }
@@ -1156,32 +879,6 @@ mod tests {
             for i in 0..half {
                 assert_eq!(a.get(i), b.get(i), "fold nv={nv} cell={i}");
             }
-        }
-
-        for (na, nb) in [(2usize, 2usize), (3, 4), (1, 5)] {
-            let nv = na + nb;
-            let len = 1usize << (nv + 1);
-            let ext: Vec<FqExt> = (0..len).map(|_| rand_ext(&mut rng)).collect();
-            let ta: Vec<FqExt> = (0..na).map(|_| rand_ext(&mut rng)).collect();
-            let tb: Vec<FqExt> = (0..nb).map(|_| rand_ext(&mut rng)).collect();
-            let ea = eq_table_mont(&ta);
-            let eb = eq_table_mont(&tb);
-            let soa = SoaFqExt::from_aos(&ext);
-            let half = len / 2;
-            assert_eq!(
-                unsafe { avx2::bitcheck_evals_split(&soa, &ea, &eb, half) },
-                bitcheck_evals_split_scalar(&soa, &ea, &eb, half),
-                "split na={na} nb={nb}"
-            );
-            let flat: Vec<FqExt> = (0..1 << nv)
-                .map(|i| ea.get(i >> nb) * eb.get(i & ((1 << nb) - 1)))
-                .collect();
-            let fsoa = SoaFqExt::from_aos(&flat);
-            assert_eq!(
-                unsafe { avx2::bitcheck_evals(&soa, &fsoa, half) },
-                bitcheck_evals_scalar(&soa, &fsoa, half),
-                "flat na={na} nb={nb}"
-            );
         }
 
         for (k_len, s_len) in [(8usize, 16usize), (4, 8), (3, 6), (5, 4)] {

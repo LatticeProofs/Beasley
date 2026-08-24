@@ -13,7 +13,7 @@ fn main() {
     let t0 = Instant::now();
     let params = HashParams::sample(20260713, n_bits, group_bits, ell);
     println!(
-        "CRS precompute ({} entries): {:?}",
+        "CRS precompute ({} table rows): {:?}",
         params.table_size(),
         t0.elapsed()
     );

@@ -14,7 +14,7 @@ pub fn mul_c_ref(h: u64) -> u64 {
 
 pub const FQ_BYTES: usize = ((64 - Q.leading_zeros()) as usize).div_ceil(8);
 
-const _: () = assert!(FQ_BYTES == 8, "Fq must be 8 bytes for q64");
+const _: () = assert!(FQ_BYTES == 8, "Fq for q64 must be 8 bytes");
 
 #[inline(always)]
 pub fn fq_le_bytes(x: Fq) -> [u8; FQ_BYTES] {
@@ -173,7 +173,7 @@ mod tests {
         for f in factors {
             prod *= f as u128;
         }
-        assert_eq!(prod, (Q - 1) as u128, "wrong prime factorization");
+        assert_eq!(prod, (Q - 1) as u128, "prime factorization is wrong");
         let g = Fq::new(GENERATOR);
         for p in factors {
             assert_ne!(g.pow((Q - 1) / p), Fq::ONE, "GENERATOR = {GENERATOR} is not a generator for p = {p}");
@@ -182,7 +182,7 @@ mod tests {
             let b = Fq::new(bad);
             assert!(
                 factors.iter().any(|&p| b.pow((Q - 1) / p) == Fq::ONE),
-                "{bad} is unexpectedly a generator"
+                "{bad} turns out to be a generator?"
             );
         }
     }
@@ -190,20 +190,20 @@ mod tests {
     #[test]
     fn roots_of_unity() {
         assert_eq!((Q - 1) % 4, 0);
-        assert_ne!((Q - 1) % 8, 0, "v₂(q−1) should be 2");
+        assert_ne!((Q - 1) % 8, 0, "v_2(q-1) should be 2");
         let w = Fq::root_of_unity(2);
         assert_eq!(w, Fq::new(Q - 1));
         assert_eq!(w.pow(2), Fq::ONE);
         assert_eq!(Fq::root_of_unity(4).pow(4), Fq::ONE);
-        assert_ne!((Q - 1) % (2 * crate::ring::N as u64), 0, "if it divides evenly a direct NTT should be used instead");
+        assert_ne!((Q - 1) % (2 * crate::ring::N as u64), 0, "if it divides, a direct NTT should be used instead");
     }
 
     #[test]
     fn q_is_five_mod_eight() {
         assert_eq!(Q % 8, 5);
-        assert_eq!((1u128 << 64) - Q as u128, C as u128, "2^64 − q must equal C");
-        assert_eq!(Fq::new(2).pow((Q - 1) / 2), Fq::new(Q - 1), "2 must be a quadratic non-residue");
-        assert_eq!(Fq::new(Q - 1).pow((Q - 1) / 2), Fq::ONE, "−1 is unexpectedly a quadratic non-residue");
+        assert_eq!((1u128 << 64) - Q as u128, C as u128, "2^64 - q must equal C");
+        assert_eq!(Fq::new(2).pow((Q - 1) / 2), Fq::new(Q - 1), "2 must be a non-residue");
+        assert_eq!(Fq::new(Q - 1).pow((Q - 1) / 2), Fq::ONE, "-1 turns out to be a non-residue?");
     }
 
     #[test]

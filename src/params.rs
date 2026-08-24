@@ -86,19 +86,11 @@ impl HashParams {
         }
     }
 
-    pub fn spectra_cached(&self) -> bool {
-        self.spectra_cache.is_some()
-    }
-
     pub fn spectra_get(&self, v: usize) -> std::borrow::Cow<'_, [Spectra]> {
         match &self.spectra_cache {
             Some(c) => std::borrow::Cow::Borrowed(&c[v]),
             None => std::borrow::Cow::Owned(self.spectra_for(v)),
         }
-    }
-
-    pub fn entry(&self, v: usize) -> &[RingElem] {
-        &self.table[v]
     }
 
     pub fn spectra_for(&self, v: usize) -> Vec<Spectra> {
@@ -181,7 +173,7 @@ mod tests {
                 combined.push(acc);
             }
         }
-        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would fall back to 2)");
+        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would go back to 2)");
     }
 
     #[test]
@@ -204,13 +196,13 @@ mod tests {
         let b = HashParams::sample(2024, 8, 4, 2);
         let dt = |p: &HashParams| crs_digest_from_table(p.n_bits, p.group_bits, p.ell, &p.table);
 
-        assert_eq!(a.crs_digest, b.crs_digest, "digests differ for the same seed");
+        assert_eq!(a.crs_digest, b.crs_digest, "the same seed produced different digests");
         assert_eq!(a.table, b.table, "the same seed produced different tables -- the premise of the seed-based digest is broken");
-        assert_eq!(dt(&a), dt(&b), "the table-based digest must match too");
+        assert_eq!(dt(&a), dt(&b), "the table-based digest must agree too");
 
         let c = HashParams::sample(2025, 8, 4, 2);
-        assert_ne!(a.crs_digest, c.crs_digest, "digests collide for different seeds");
-        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to distinguish CRS from different seeds");
+        assert_ne!(a.crs_digest, c.crs_digest, "different seeds produced identical digests");
+        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to separate CRSs from different seeds");
     }
 
     #[test]
@@ -228,7 +220,7 @@ mod tests {
                 }
             }
         }
-        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "upper-half ratio {hi}/{total}");
+        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "high-half ratio {hi}/{total}");
     }
 
     #[test]

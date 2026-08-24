@@ -17,15 +17,10 @@ fn main() {
     println!(
         "phase_bench: n_bits = {n_bits}, group_bits = {group_bits}, ell = {ell}, nizk1 = {nizk1}"
     );
-    println!(
-        "env:               AVX2 {} | rayon threads {}",
-        if voprf::simd::avx2_enabled() { "on" } else { "off" },
-        rayon::current_num_threads()
-    );
 
     let t = Instant::now();
     let params = HashParams::sample(20260713, n_bits, group_bits, ell);
-    println!("CRS precompute:    {:?}  ({} entries)", t.elapsed(), params.table_size());
+    println!("CRS precompute:    {:?}  ({} rows)", t.elapsed(), params.table_size());
 
     let mut rng = SimpleRng::new(42);
     let bits: Vec<bool> = (0..n_bits).map(|_| rng.next_bool()).collect();
@@ -75,7 +70,7 @@ fn main() {
     let t = Instant::now();
     let rows = build_rows(&params, &ch, alpha, None);
     println!(
-        "build_rows(a_base):{:?}  ({} symbols × {} rows × {} cols = {} length-{} evaluations; u-side flattened width {})",
+        "build_rows(a_base):{:?}  ({} symbols x {} rows x {} cols = {} length-{} evaluations; u-side flattened width {})",
         t.elapsed(),
         rows.a_base.len(),
         rows.a_base[0].len(),
@@ -138,7 +133,7 @@ fn main() {
     ];
     let bytes = proof.to_bytes();
     let b = proof.size_breakdown();
-    assert_eq!(bytes.len(), b.total(), "serialized length disagrees with the accounting table");
+    assert_eq!(bytes.len(), b.total(), "serialized length disagrees with the size breakdown");
     println!(
         "proof size:        {} B transcript (sumcheck {} B + plain scalars {} B; {} rounds; {})",
         b.transcript(),

@@ -270,10 +270,10 @@ mod tests {
         assert_eq!(
             proof_fingerprint(&proof),
             proof_fingerprint(&back),
-            "fingerprint differs after roundtrip ⇒ some field is not encoded"
+            "fingerprint differs after roundtrip => some field is missing from the encoding"
         );
-        assert_eq!(back.to_bytes(), bytes, "re-encoding must be byte-identical");
-        assert!(verify_nizk1(&params, &nz, &st, &back), "the decoded proof failed verification");
+        assert_eq!(back.to_bytes(), bytes, "re-encoding must produce exactly the same bytes");
+        assert!(verify_nizk1(&params, &nz, &st, &back), "the decoded proof does not verify");
     }
 
     #[test]
@@ -295,18 +295,18 @@ mod tests {
 
         assert!(Proof::from_bytes(&[]).is_none(), "empty input");
         for cut in [1usize, 4, 17, 100, good.len() - 1] {
-            assert!(Proof::from_bytes(&good[..cut]).is_none(), "truncation at {cut} was unexpectedly accepted");
+            assert!(Proof::from_bytes(&good[..cut]).is_none(), "truncating to {cut} still passed");
         }
         let mut tail = good.clone();
         tail.push(0);
-        assert!(Proof::from_bytes(&tail).is_none(), "one extra byte was unexpectedly accepted");
+        assert!(Proof::from_bytes(&tail).is_none(), "one extra byte still passed");
         let mut huge = good.clone();
         huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(Proof::from_bytes(&huge).is_none(), "a u32::MAX round count was unexpectedly accepted");
+        assert!(Proof::from_bytes(&huge).is_none(), "a u32::MAX round count still passed");
         let mut bad = good.clone();
         let off = 4 + 4;
         bad[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(Proof::from_bytes(&bad).is_none(), "an unreduced Fq was unexpectedly accepted");
+        assert!(Proof::from_bytes(&bad).is_none(), "a non-reduced Fq still passed");
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod tests {
                 Some(p) => assert_ne!(
                     proof_fingerprint(&p),
                     fp,
-                    "flipping byte {i} left the fingerprint unchanged ⇒ that byte is not covered"
+                    "flipping byte {i} left the fingerprint unchanged => that byte is not part of the fingerprint"
                 ),
             }
         }

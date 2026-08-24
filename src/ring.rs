@@ -32,12 +32,6 @@ impl RingElem {
         RingElem { c: vec![Fq::ZERO; N] }
     }
 
-    pub fn constant(v: u64) -> Self {
-        let mut r = RingElem::zero();
-        r.c[0] = Fq::new(v);
-        r
-    }
-
     pub fn eval(&self, alpha: FqExt) -> FqExt {
         poly_eval(&self.c, alpha)
     }
@@ -120,19 +114,6 @@ pub fn gadget_decompose(a: &RingElem) -> Vec<RingElem> {
         .collect()
 }
 
-pub fn gadget_decompose_slice(coeffs: &[Fq]) -> Vec<Vec<Fq>> {
-    let mut out = vec![vec![Fq::ZERO; coeffs.len()]; GADGET_LEN];
-    for (i, &coef) in coeffs.iter().enumerate() {
-        let mut v = coef.0 as u64;
-        for d in 0..GADGET_LEN {
-            out[d][i] = Fq::new(v % GADGET_BASE);
-            v /= GADGET_BASE;
-        }
-        debug_assert_eq!(v, 0);
-    }
-    out
-}
-
 pub fn gadget_recompose(digits: &[RingElem]) -> RingElem {
     let mut acc = RingElem::zero();
     for (d, m) in digits.iter().enumerate() {
@@ -156,23 +137,23 @@ mod tests {
 
     #[test]
     fn modulus_is_irreducible_over_z() {
-        assert!(N.is_power_of_two(), "N = {N} is not a power of two ⇒ X^N+1 is reducible (P1)");
+        assert!(N.is_power_of_two(), "N = {N} is not a power of two => X^N+1 is reducible (P1)");
         assert_eq!(M_BIT_ROWS, (64 - crate::field::Q.leading_zeros()) as usize);
     }
 
     #[test]
     fn gadget_constants_are_consistent() {
         assert_eq!(GADGET_BASE, 1u64 << DIGIT_BITS);
-        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "digit grouping must exactly cover M_BIT_ROWS");
+        assert_eq!(GADGET_LEN * DIGIT_BITS, M_BIT_ROWS, "the digit grouping must exactly cover M_BIT_ROWS");
         assert_eq!(
             M_BIT_ROWS,
             (64 - crate::field::Q.leading_zeros()) as usize,
-            "M_BIT_ROWS must be ⌈log₂ q⌉"
+            "M_BIT_ROWS must be ceil(log2 q)"
         );
         assert_eq!(W_RANGE_BASE, 2, "the W table only ever holds bits");
         assert!(
             (GADGET_LEN as u32) * (DIGIT_BITS as u32) >= 64 - crate::field::Q.leading_zeros(),
-            "gadget is too short; the top digit's range does not cover q"
+            "the gadget is too short, the range of the top digit does not reach q"
         );
     }
 
@@ -201,10 +182,10 @@ mod tests {
         for (d, dig) in digits.iter().enumerate() {
             for i in 0..N {
                 let v = dig.c[i].0 as u64;
-                assert!(v < GADGET_BASE, "digit out of range [0,B)");
+                assert!(v < GADGET_BASE, "digit outside [0,B)");
                 for b in 0..DIGIT_BITS {
                     let bit = (v >> b) & 1;
-                    assert!(bit < W_RANGE_BASE, "the second level must be bits");
+                    assert!(bit < W_RANGE_BASE, "the second level must be a bit");
                     acc.c[i] = acc.c[i] + bit_weight(d * DIGIT_BITS + b) * Fq::new(bit);
                 }
             }

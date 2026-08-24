@@ -44,10 +44,6 @@ impl<'a> Nizk1Ctx<'a> {
     }
 }
 
-pub fn ell_pad(params: &HashParams) -> usize {
-    params.ell.next_power_of_two()
-}
-
 pub fn phase_a_cells(params: &HashParams) -> usize {
     params.ell * g_pad(params)
 }
@@ -66,7 +62,7 @@ pub fn h_cells(params: &HashParams) -> usize {
 
 pub fn hpack_rows(params: &HashParams) -> usize {
     let rows = h_cells(params).div_ceil(crate::nizk1::HPACK_BITS).max(1);
-    debug_assert!(rows.is_power_of_two(), "hpack_rows must be a power of two (precondition of hpack_point)");
+    debug_assert!(rows.is_power_of_two(), "hpack_rows must be a power of two (required by hpack_point)");
     rows
 }
 
@@ -245,7 +241,7 @@ pub fn compute_quotients(
                 ts.push(t);
             }
             CKind::ComRand { which, idx } | CKind::ComMsg { which, idx } => {
-                let q = bq.expect("Phase B quotients not provided");
+                let q = bq.expect("the Phase B quotients were not provided");
                 let ck = if which == 0 { &nz.unwrap().nz.com_r } else { &nz.unwrap().nz.com_x };
                 let off = if matches!(meta.kind, CKind::ComRand { .. }) { 0 } else { ck.com_n() };
                 let src = if which == 0 { &q.cr } else { &q.dx };
@@ -357,7 +353,7 @@ pub fn build_rows(
                 }
             }
             CKind::ComRand { which, idx } => {
-                let ctx = nz.expect("ComRand requires Phase B parameters");
+                let ctx = nz.expect("ComRand requires the Phase B parameters");
                 let (a_hat_k, _) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 for (t, &coef) in a_hat_k[idx].iter().enumerate() {
@@ -367,7 +363,7 @@ pub fn build_rows(
                 p_pub = -if which == 0 { cr_hat[idx] } else { dx_hat[idx] };
             }
             CKind::ComMsg { which, idx } => {
-                let ctx = nz.expect("ComMsg requires Phase B parameters");
+                let ctx = nz.expect("ComMsg requires the Phase B parameters");
                 let (_, b_hat_k) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 let two = FqExt::from_u64(2);
@@ -442,7 +438,7 @@ mod tests {
                     assert_eq!(
                         rows.a_base[v][r][d],
                         params.a(v, r, d).eval(alpha),
-                        "a_base is not A^(v)[r][d](α): v={v} r={r} d={d}"
+                        "a_base is not A^(v)[r][d](alpha): v={v} r={r} d={d}"
                     );
                 }
             }
@@ -468,7 +464,7 @@ mod tests {
     fn check_witness_rejects_out_of_range_digit() {
         let (params, groups) = setup(8, 2, 1);
         let (ch, wit) = eval_h(&params, &groups);
-        assert!(check_witness(&params, &ch, &groups, &wit), "honest witness should pass");
+        assert!(check_witness(&params, &ch, &groups, &wit), "an honest witness must pass");
         let mut bad = eval_h(&params, &groups).1;
         bad.m[0][2].c[7] = Fq::new(GADGET_BASE);
         assert!(
@@ -480,7 +476,7 @@ mod tests {
                 .flat_map(|i| wit.column(i))
                 .flat_map(|m| m.c.iter())
                 .any(|c| c.0 as u64 >= 2);
-            assert!(big, "base-{GADGET_BASE} honest witness has no digit ≥ 2");
+            assert!(big, "the honest base-{GADGET_BASE} witness has no digit >= 2 at all?");
         }
     }
 

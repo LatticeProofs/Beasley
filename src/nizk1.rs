@@ -1,5 +1,4 @@
 use crate::field::Fq;
-use crate::hash::HashWitness;
 use crate::ntt::{full_inner_product, neg_and_quotient_rows, to_spectra, Spectra};
 use crate::params::HashParams;
 use crate::ring::{reduce_only, RingElem, N};
@@ -11,7 +10,7 @@ pub const W_SLACK: usize = 5;
 
 pub const HPACK_BITS: usize = 512;
 
-const _: () = assert!(HPACK_BITS.is_power_of_two() && HPACK_BITS <= N, "one h_pack row does not fit in a single ring element");
+const _: () = assert!(HPACK_BITS.is_power_of_two() && HPACK_BITS <= N, "one h_pack row does not fit into a single ring element");
 
 pub struct ComKey {
     pub a: Vec<Vec<RingElem>>,
@@ -22,7 +21,7 @@ pub struct ComKey {
 impl ComKey {
     pub fn sample(rng: &mut CsRng, com_n: usize, msg_len: usize, w: usize) -> Self {
         let rho_len = com_n + msg_len + w;
-        assert!(rho_len > com_n + msg_len, "Appendix F hiding requires w ≥ 1");
+        assert!(rho_len > com_n + msg_len, "the hiding of Appendix F needs w >= 1");
         let re = |rng: &mut CsRng| RingElem { c: (0..N).map(|_| rng.next_fq()).collect() };
         let a: Vec<Vec<RingElem>> =
             (0..com_n).map(|_| (0..rho_len).map(|_| re(rng)).collect()).collect();
@@ -51,7 +50,7 @@ pub fn derive_ar(r_dim: usize, ell: usize, c_r: &[RingElem]) -> Vec<Vec<RingElem
     for e in c_r {
         debug_assert_eq!(e.c.len(), N);
         for c in &e.c {
-            debug_assert!((c.0 as u64) < crate::field::Q, "c_r coefficients must be canonical representatives");
+            debug_assert!((c.0 as u64) < crate::field::Q, "coefficients of c_r must be canonical representatives");
             enc.extend_from_slice(&crate::field::fq_le_bytes(*c));
         }
     }
@@ -99,7 +98,7 @@ impl Nizk1Params {
     pub fn sample(seed: u64, params: &HashParams, r_dim: usize, com_n: usize, w: usize) -> Self {
         let mut rng = CsRng::from_parts("voprf-nizk1-crs-v1", &[&seed.to_le_bytes()]);
         let h_cells = crate::relation::h_cells(params);
-        assert!(h_cells.is_power_of_two(), "h_cells = g_pad·2·2^g must be a power of two (precondition for hpack indexing)");
+        assert!(h_cells.is_power_of_two(), "h_cells = g_pad*2^g must be a power of two (required by hpack indexing)");
         let hpack_len = crate::relation::hpack_rows(params);
         let com_r = ComKey::sample(&mut rng, com_n, 2 * r_dim, w);
         let com_x = ComKey::sample(&mut rng, com_n, hpack_len, w);
@@ -417,11 +416,11 @@ mod tests {
         let a = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(1), 0), &params, &nz, &g0);
         let b = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(2), 0), &params, &nz, &g0);
         let a2 = sample_blind(QueryTicket::insecure_for_tests(insecure_test_secret(1), 0), &params, &nz, &g0);
-        assert_eq!(a.r_pos, a2.r_pos, "same secret must be deterministic");
+        assert_eq!(a.r_pos, a2.r_pos, "the same secret must be deterministic");
         assert_eq!(a.rho_x_pos, a2.rho_x_pos);
-        assert_ne!(a.r_pos, b.r_pos, "different secrets ⇒ different R⁺");
-        assert_ne!(a.rho_r_pos, b.rho_r_pos, "different secrets ⇒ different ρ_r⁺");
-        assert_ne!(a.rho_x_pos, b.rho_x_pos, "different secrets ⇒ different ρ_x⁺");
+        assert_ne!(a.r_pos, b.r_pos, "different secrets => different R+");
+        assert_ne!(a.rho_r_pos, b.rho_r_pos, "different secrets => different rho_r+");
+        assert_ne!(a.rho_x_pos, b.rho_x_pos, "different secrets => different rho_x+");
         assert_ne!(a.r_pos, a.r_neg);
         assert_ne!(a.rho_r_pos, a.rho_x_pos);
     }
@@ -435,14 +434,14 @@ mod tests {
         let mut ctr = QueryCounter::new(secret);
         let ws: Vec<_> =
             (0..3).map(|_| sample_blind(ctr.issue(), &params, &nz, &g0)).collect();
-        assert_eq!(ctr.peek(), 3, "counter did not advance after issue");
+        assert_eq!(ctr.peek(), 3, "the counter did not advance after issue");
         for i in 0..ws.len() {
             assert_eq!(ws[i].counter, i as u64);
             for k in (i + 1)..ws.len() {
-                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}: R⁺ collided");
-                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}: R⁻ collided");
-                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}: ρ_r⁺ collided");
-                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}: ρ_x⁺ collided");
+                assert_ne!(ws[i].r_pos, ws[k].r_pos, "counter {i} vs {k}: identical R+");
+                assert_ne!(ws[i].r_neg, ws[k].r_neg, "counter {i} vs {k}: identical R-");
+                assert_ne!(ws[i].rho_r_pos, ws[k].rho_r_pos, "counter {i} vs {k}: identical rho_r+");
+                assert_ne!(ws[i].rho_x_pos, ws[k].rho_x_pos, "counter {i} vs {k}: identical rho_x+");
             }
         }
         let replay = sample_blind(
@@ -463,7 +462,7 @@ mod tests {
         let mut ctr = QueryCounter::new(insecure_test_secret(46));
         let a = sample_blind(ctr.issue(), &params, &nz, &g0);
         let b = sample_blind(ctr.issue(), &params, &nz, &g0);
-        assert_ne!(a.zk_seed, b.zk_seed, "the two tickets share a zk_seed ⇒ masks cancel on subtraction");
+        assert_ne!(a.zk_seed, b.zk_seed, "the two tickets share a zk_seed => the masks cancel on subtraction");
         assert_ne!(a.counter, b.counter);
     }
 
@@ -555,7 +554,7 @@ mod tests {
                 assert!(hp.is_power_of_two(), "hpack_rows is not a power of two (n={n} g={g})");
                 assert!(per.is_power_of_two(), "hpack_per is not a power of two (n={n} g={g})");
                 assert_eq!(hp * per, h_cells(&params), "incomplete shape (n={n} g={g})");
-                assert!(per <= N, "a single W row cannot hold {per} cells (n={n} g={g})");
+                assert!(per <= N, "one W row cannot hold {per} cells (n={n} g={g})");
                 if params.num_groups() < crate::relation::g_pad(&params) {
                     saw_padding_blocks = true;
                 }
@@ -569,8 +568,8 @@ mod tests {
                 assert_eq!(nz.hpack_len, hp, "Nizk1Params::hpack_len is out of sync (n={n} g={g})");
                 for lay in [w_layout(&params, None), w_layout(&params, Some(&nz))] {
                     assert_eq!(lay.h_pack % hp, 0, "h_pack is not aligned to hpack_rows (n={n} g={g})");
-                    assert!(lay.h_pack >= num_m_rows(&params), "h_pack collides with m's bit rows");
-                    assert!(lay.h_pack + hp <= lay.total, "h_pack segment overflows total");
+                    assert!(lay.h_pack >= num_m_rows(&params), "h_pack collides with the bit rows of m");
+                    assert!(lay.h_pack + hp <= lay.total, "the h_pack segment overflows total");
                 }
                 let b = w_layout(&params, Some(&nz));
                 let mut prev = b.h_pack + hp;
@@ -590,7 +589,7 @@ mod tests {
         }
         assert!(saw_single_row, "no shape with hpack_rows == 1 was exercised");
         assert!(saw_padding_blocks, "no shape with g_pad > G (padding blocks) was exercised");
-        assert!(saw_rounding, "no shape where num_m_rows requires rounding up was exercised");
+        assert!(saw_rounding, "no shape where num_m_rows must round up was exercised");
     }
 
     #[test]
@@ -599,10 +598,10 @@ mod tests {
             .map(|i| RingElem { c: (0..N).map(|k| Fq(((i * 7 + k) as u64 % 1000) as _)).collect() })
             .collect();
         let a = derive_ar(2, 3, &cr);
-        assert_eq!(a, derive_ar(2, 3, &cr), "same input must be deterministic");
+        assert_eq!(a, derive_ar(2, 3, &cr), "the same input must be deterministic");
         cr[1].c[500] = cr[1].c[500] + Fq::ONE;
         let b = derive_ar(2, 3, &cr);
-        assert_ne!(a, b, "A_r did not change after c_r changed");
+        assert_ne!(a, b, "A_r did not change after c_r was modified");
         assert_ne!(derive_ar(2, 3, &cr)[0][0], derive_ar(3, 2, &cr)[0][0]);
     }
 
@@ -623,8 +622,6 @@ mod tests {
                 }
             }
         }
-        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "upper-half ratio {hi}/{total}");
+        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "high-half ratio {hi}/{total}");
     }
 }
-
-pub type _PhaseAWitness = HashWitness;
