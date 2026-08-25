@@ -23,7 +23,7 @@ fn to_raw(x: Fq) -> u64 {
 }
 #[inline(always)]
 fn from_raw(x: u64) -> Fq {
-    debug_assert!(x < QN, "from_raw got a non-canonical value");
+    debug_assert!(x < QN, "from_raw received a non-canonical value");
     Fq(x)
 }
 #[inline(always)]
@@ -809,7 +809,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn avx2_primitives_match_scalar_on_adversarial_values() {
         if !have_avx2() {
-            eprintln!("skipped: no AVX2 on this machine");
+            eprintln!("skipped: AVX2 not available");
             return;
         }
         let edge: Vec<u64> = vec![
@@ -861,7 +861,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn avx2_kernels_match_scalar() {
         if !have_avx2() {
-            eprintln!("skipped: no AVX2 on this machine");
+            eprintln!("skipped: AVX2 not available");
             return;
         }
         let mut rng = SimpleRng::new(20260802);
@@ -933,7 +933,7 @@ mod tests {
                 batched_phase_a_round_scalar(
                     &w_bits, &apow, &ea, &eb, &lg, cells, s_len, 0, k_len
                 ),
-                "the round0 specialization disagrees with the generic round k={k_len} s={s_len}"
+                "round0 specialization disagrees with the general round k={k_len} s={s_len}"
             );
         }
     }

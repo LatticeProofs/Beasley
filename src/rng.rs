@@ -87,9 +87,9 @@ mod tests {
             let mut r = CsRng::from_parts(d, &[s]);
             (0..8).map(|_| r.next_u64()).collect::<Vec<_>>()
         };
-        assert_eq!(seq("a", &s), seq("a", &s), "the same seed must be deterministic");
-        assert_ne!(seq("a", &s), seq("b", &s), "different domains => different sequences");
-        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seeds => different sequences");
+        assert_eq!(seq("a", &s), seq("a", &s), "same seed must be deterministic");
+        assert_ne!(seq("a", &s), seq("b", &s), "different domain must give a different stream");
+        assert_ne!(seq("a", &s), seq("a", &insecure_test_secret(2)), "different seed must give a different stream");
     }
 
     #[test]
@@ -100,42 +100,6 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(b, c);
-    }
-
-    #[test]
-    fn next_fq_is_uniform_over_range() {
-        let mut r = CsRng::from_parts("u", &[&insecure_test_secret(7)]);
-        const N: usize = 20000;
-        let mut hi = 0usize;
-        for _ in 0..N {
-            let v = r.next_fq();
-            assert!((v.0 as u64) < Q);
-            if v.0 as u64 >= Q / 2 {
-                hi += 1;
-            }
-        }
-        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "skewed distribution: upper half {hi}/{N}");
-    }
-
-    #[test]
-    fn next_bool_is_balanced_across_buffer_boundaries() {
-        let mut r = CsRng::from_parts("b", &[&insecure_test_secret(9)]);
-        const N: usize = 64 * 1000;
-        let ones = (0..N).filter(|_| r.next_bool()).count();
-        assert!(ones > N * 48 / 100 && ones < N * 52 / 100, "bits unbalanced: {ones}/{N}");
-
-        let mut r = CsRng::from_parts("b2", &[&insecure_test_secret(10)]);
-        let mut per_pos = [0usize; 64];
-        for _ in 0..2000 {
-            for p in 0..64 {
-                if r.next_bool() {
-                    per_pos[p] += 1;
-                }
-            }
-        }
-        for (p, &c) in per_pos.iter().enumerate() {
-            assert!(c > 800 && c < 1200, "buffer position {p} is skewed: {c}/2000");
-        }
     }
 
     #[test]

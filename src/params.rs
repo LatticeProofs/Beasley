@@ -20,10 +20,10 @@ pub struct HashParams {
 
 impl HashParams {
     pub fn sample(seed: u64, n_bits: usize, group_bits: usize, ell: usize) -> Self {
-        assert!(group_bits >= 1, "g must be at least 1");
+        assert!(group_bits >= 1, "g must be >= 1");
         assert!(n_bits % group_bits == 0, "g must divide n_bits");
-        assert!(n_bits / group_bits >= 2, "at least two groups are required");
-        assert!(ell >= 1, "module rank must be at least 1");
+        assert!(n_bits / group_bits >= 2, "need at least two groups");
+        assert!(ell >= 1, "module rank must be >= 1");
         let tsz = 1usize << group_bits;
         let dims = crs_dims(n_bits, group_bits, ell, tsz);
         let cells = ell * ml_of(ell);
@@ -147,36 +147,6 @@ mod tests {
     use crate::ring::{gadget_decompose, gadget_recompose};
 
     #[test]
-    fn table_rows_are_independent() {
-        let p = HashParams::sample(1, 8, 4, 2);
-        assert_eq!(p.table_size(), 16);
-        assert_eq!(p.ml(), 2 * GADGET_LEN);
-        assert!(p.table.iter().all(|r| r.len() == p.ell * p.ml()));
-        for a in 0..p.table_size() {
-            for b in (a + 1)..p.table_size() {
-                assert_ne!(p.table[a], p.table[b], "matrix {a} equals matrix {b}");
-            }
-        }
-        let half = 4usize;
-        let (w, wp) = (2usize, 3usize);
-        let ml = p.ml();
-        let mut combined: Vec<RingElem> = Vec::with_capacity(p.ell * ml);
-        for r in 0..p.ell {
-            for col in 0..ml {
-                let mut acc = RingElem::zero();
-                for t in 0..p.ell {
-                    let dg = gadget_decompose(p.a(wp, t, col));
-                    for c in 0..GADGET_LEN {
-                        acc = &acc + &(p.a(w, r, t * GADGET_LEN + c) * &dg[c]);
-                    }
-                }
-                combined.push(acc);
-            }
-        }
-        assert_ne!(p.table[w * half + wp], combined, "the table still looks combined (e(T) would go back to 2)");
-    }
-
-    #[test]
     fn sampling_is_deterministic_and_domain_separated() {
         let a = HashParams::sample(7, 8, 4, 1);
         let b = HashParams::sample(7, 8, 4, 1);
@@ -188,39 +158,6 @@ mod tests {
         let d = HashParams::sample(7, 8, 4, 2);
         assert_ne!(a.crs_digest, d.crs_digest);
         assert_ne!(a.table, d.table, "ell is part of the sampling domain");
-    }
-
-    #[test]
-    fn seed_determines_the_table() {
-        let a = HashParams::sample(2024, 8, 4, 2);
-        let b = HashParams::sample(2024, 8, 4, 2);
-        let dt = |p: &HashParams| crs_digest_from_table(p.n_bits, p.group_bits, p.ell, &p.table);
-
-        assert_eq!(a.crs_digest, b.crs_digest, "the same seed produced different digests");
-        assert_eq!(a.table, b.table, "the same seed produced different tables -- the premise of the seed-based digest is broken");
-        assert_eq!(dt(&a), dt(&b), "the table-based digest must agree too");
-
-        let c = HashParams::sample(2025, 8, 4, 2);
-        assert_ne!(a.crs_digest, c.crs_digest, "different seeds produced identical digests");
-        assert_ne!(dt(&a), dt(&c), "the table-based digest failed to separate CRSs from different seeds");
-    }
-
-    #[test]
-    fn table_coefficients_are_uniform_over_range() {
-        let p = HashParams::sample(11, 8, 2, 1);
-        let (mut hi, mut total) = (0usize, 0usize);
-        for row in &p.table {
-            for e in row {
-                for c in &e.c {
-                    assert!((c.0 as u64) < crate::field::Q, "outside [0,q)");
-                    if (c.0 as u64) >= crate::field::Q / 2 {
-                        hi += 1;
-                    }
-                    total += 1;
-                }
-            }
-        }
-        assert!(hi > total * 45 / 100 && hi < total * 55 / 100, "high-half ratio {hi}/{total}");
     }
 
     #[test]

@@ -103,7 +103,7 @@ mod tests {
     fn keccak_matches_official_vectors() {
         let mut st = [0u64; 25];
         keccak_f(&mut st);
-        assert_eq!(st[0], 0xF1258F7940E1DDE7, "keccak_f lane 0 on the all-zero state");
+        assert_eq!(st[0], 0xF1258F7940E1DDE7, "keccak_f on the all-zero state, lane 0");
 
         assert_eq!(
             hex(&shake128(b"", 32)),

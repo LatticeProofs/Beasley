@@ -70,7 +70,7 @@ fn main() {
     let t = Instant::now();
     let rows = build_rows(&params, &ch, alpha, None);
     println!(
-        "build_rows(a_base):{:?}  ({} symbols x {} rows x {} cols = {} length-{} evaluations; u-side flattened width {})",
+        "build_rows(a_base):{:?}  ({} symbols x {} rows x {} cols = {} length-{} evaluations; flattened u-side width {})",
         t.elapsed(),
         rows.a_base.len(),
         rows.a_base[0].len(),
@@ -96,7 +96,7 @@ fn main() {
         let d = t.elapsed();
         let fq = nz.r_dim * params.ell * voprf::ring::N;
         println!(
-            "derive_ar:         {:?}  ({} F_q = {} KB XOF; r_dim={} ell={})",
+            "derive_ar:         {:?}  ({} F_q values = {} KB XOF; r_dim={} ell={})",
             d,
             fq,
             fq * voprf::field::FQ_BYTES / 1024,
@@ -133,9 +133,9 @@ fn main() {
     ];
     let bytes = proof.to_bytes();
     let b = proof.size_breakdown();
-    assert_eq!(bytes.len(), b.total(), "serialized length disagrees with the size breakdown");
+    assert_eq!(bytes.len(), b.total(), "serialized length does not match the size breakdown");
     println!(
-        "proof size:        {} B transcript (sumcheck {} B + plain scalars {} B; {} rounds; {})",
+        "proof size:        {} B transcript (sumcheck {} B + public scalars {} B; {} rounds; {})",
         b.transcript(),
         b.sumcheck,
         b.public_scalars,
@@ -146,7 +146,7 @@ fn main() {
             .join(" ")
     );
     println!(
-        "  serialized total:  {} B (+ framing {} B + commitment STUB {} B)",
+        "  serialized total:  {} B (+ framing {} B + commitment stub {} B)",
         bytes.len(),
         b.framing,
         b.commitments_stub
@@ -164,7 +164,7 @@ fn main() {
     if nizk1 == 1 {
         voprf::report::report(&params, &nz, 2, 1).print();
         println!(
-            "  sumcheck transcript                  = {:>8.2} KB (**measured**: ser::to_bytes)",
+            "  sumcheck transcript                  = {:>8.2} KB (measured via ser::to_bytes)",
             b.transcript() as f64 / 1024.0
         );
     }

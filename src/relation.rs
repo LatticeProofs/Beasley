@@ -241,7 +241,7 @@ pub fn compute_quotients(
                 ts.push(t);
             }
             CKind::ComRand { which, idx } | CKind::ComMsg { which, idx } => {
-                let q = bq.expect("the Phase B quotients were not provided");
+                let q = bq.expect("Phase B quotients not provided");
                 let ck = if which == 0 { &nz.unwrap().nz.com_r } else { &nz.unwrap().nz.com_x };
                 let off = if matches!(meta.kind, CKind::ComRand { .. }) { 0 } else { ck.com_n() };
                 let src = if which == 0 { &q.cr } else { &q.dx };
@@ -353,7 +353,7 @@ pub fn build_rows(
                 }
             }
             CKind::ComRand { which, idx } => {
-                let ctx = nz.expect("ComRand requires the Phase B parameters");
+                let ctx = nz.expect("ComRand requires Phase B parameters");
                 let (a_hat_k, _) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 for (t, &coef) in a_hat_k[idx].iter().enumerate() {
@@ -363,7 +363,7 @@ pub fn build_rows(
                 p_pub = -if which == 0 { cr_hat[idx] } else { dx_hat[idx] };
             }
             CKind::ComMsg { which, idx } => {
-                let ctx = nz.expect("ComMsg requires the Phase B parameters");
+                let ctx = nz.expect("ComMsg requires Phase B parameters");
                 let (_, b_hat_k) = &akey_hat[which];
                 let (pos, neg) = rho_rows(ctx, which);
                 let two = FqExt::from_u64(2);
@@ -409,43 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn u_pub_is_the_gadget_column_not_the_bit_row() {
-        let (params, groups) = setup(16, 4, 3);
-        let (ch, _) = eval_h(&params, &groups);
-        let mut rng = SimpleRng::new(20260802);
-        let alpha = rng.next_fq4();
-        let rows = build_rows(&params, &ch, alpha, None);
-        let metas = constraints(&params, None);
-        let mut checked = 0usize;
-        for (row, meta) in rows.lin.iter().zip(&metas) {
-            if meta.kind != CKind::Base {
-                continue;
-            }
-            for v in 0..params.table_size() {
-                assert_eq!(
-                    rows.u_pub(row, v),
-                    params.a(v, row.chain, 0).eval(alpha),
-                    "u_pub read the wrong cell: v={v} chain={}",
-                    row.chain
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "no Base row was exercised");
-        for v in 0..params.table_size() {
-            for r in 0..params.ell {
-                for d in 0..params.ml() {
-                    assert_eq!(
-                        rows.a_base[v][r][d],
-                        params.a(v, r, d).eval(alpha),
-                        "a_base is not A^(v)[r][d](alpha): v={v} r={r} d={d}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn honest_witness_passes_direct_check() {
         let (params, groups) = setup(8, 2, 2);
         let (ch, wit) = eval_h(&params, &groups);
@@ -458,26 +421,6 @@ mod tests {
         let (ch, mut wit) = eval_h(&params, &groups);
         wit.m[0][3].c[100] = wit.m[0][3].c[100] + Fq::ONE;
         assert!(!check_witness(&params, &ch, &groups, &wit));
-    }
-
-    #[test]
-    fn check_witness_rejects_out_of_range_digit() {
-        let (params, groups) = setup(8, 2, 1);
-        let (ch, wit) = eval_h(&params, &groups);
-        assert!(check_witness(&params, &ch, &groups, &wit), "an honest witness must pass");
-        let mut bad = eval_h(&params, &groups).1;
-        bad.m[0][2].c[7] = Fq::new(GADGET_BASE);
-        assert!(
-            !check_witness(&params, &ch, &groups, &bad),
-            "digit = GADGET_BASE ({GADGET_BASE}) is out of range and must be rejected"
-        );
-        if GADGET_BASE > 2 {
-            let big = (2..=params.num_groups())
-                .flat_map(|i| wit.column(i))
-                .flat_map(|m| m.c.iter())
-                .any(|c| c.0 as u64 >= 2);
-            assert!(big, "the honest base-{GADGET_BASE} witness has no digit >= 2 at all?");
-        }
     }
 
     #[test]

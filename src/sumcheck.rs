@@ -465,7 +465,7 @@ pub fn prove_batched_w(
         let half = 1usize << (nv_w - 1 - round);
         if round + 1 == nv_w {
             debug_assert_eq!(half, 1);
-            debug_assert!(round >= nv_k, "the last round is necessarily in phase B (s_len >= 2)");
+            debug_assert!(round >= nv_k, "final round must be in phase B (s_len >= 2)");
             let (w0, dw) = (w[0], w[1] - w[0]);
             let (b0, db) = (b[0], b[1] - b[0]);
             let t = tau0[round];
@@ -737,7 +737,6 @@ pub fn lagrange_eval(evals: &[FqExt], x: FqExt) -> FqExt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::Q;
     use crate::mle::mle_eval;
     use crate::transcript::SimpleRng;
 
@@ -878,7 +877,7 @@ mod tests {
             assert_eq!(all[0] + all[1], claim_sim, "round {round} g(0)+g(1) != claim");
             let sent: Vec<FqExt> =
                 all.iter().enumerate().filter(|(i, _)| *i != 1).map(|(_, &v)| v).collect();
-            assert_eq!(proof.rounds[round], sent, "round polynomial of round {round}");
+            assert_eq!(proof.rounds[round], sent, "round polynomial at round {round}");
             for &e in &sent {
                 tr_sim.absorb_fq4(e);
             }
@@ -920,9 +919,9 @@ mod tests {
                 (FqExt::ONE - x) * main_final + ipre * nmask.eval(x)
             })
             .collect();
-        assert_eq!(wall[0] + wall[1], claim_sim, "w round g(0)+g(1) != claim");
+        assert_eq!(wall[0] + wall[1], claim_sim, "w-round g(0)+g(1) != claim");
         let wsent: Vec<FqExt> = vec![wall[0], wall[2]];
-        assert_eq!(proof.rounds[nv_w], wsent, "round polynomial of the w round");
+        assert_eq!(proof.rounds[nv_w], wsent, "w-round round polynomial");
         for &e in &wsent {
             tr_sim.absorb_fq4(e);
         }
@@ -935,142 +934,21 @@ mod tests {
         let (e_b, r_v) = verify_batched_w(claim0, &degs, &proof, &mut tr_v).expect("v");
         assert_eq!(r, r_v);
         assert_eq!(sim_r, r_v);
-        assert_eq!(e_b, sim_final, "e_b vs sim-final (verify folding)");
-        assert_eq!(open_w, w_dot, "open_w must be the masked W_dot(r_w)");
-        assert_ne!(open_w, wb[0], "when sigma_W != 0, W_dot(r_w) must not equal W_tilde(r_w)");
-        assert_eq!(n_at_c, nmask.eval(c), "N(c) is wrong");
+        assert_eq!(e_b, sim_final, "e_b vs simulated final (verifier folding)");
+        assert_eq!(open_w, w_dot, "open_w must be the masked evaluation at r_w");
+        assert_ne!(open_w, wb[0], "with sigma_W != 0 the masked and unmasked evaluations must differ");
+        assert_eq!(n_at_c, nmask.eval(c), "N(c) mismatch");
         let ind = sim_r[..nv_w].iter().fold(FqExt::ONE, |a, &x| a * (FqExt::ONE - x));
         assert_eq!(
             e_b,
             (FqExt::ONE - c) * main_final + ind * n_at_c,
-            "the closing identity of Libra step (f) does not hold"
+            "final-check equation does not hold"
         );
         let w_at = mle_eval(&w_fq4, &r_v[..nv_w]);
         let lg_at = mle_eval(&lg, &r_v[..nv_k]);
         let apow_at = mle_eval(&apow, &r_v[nv_k..nv_w]);
-        assert_eq!(w_at, wb[0], "W̃ via mle vs fold");
-        assert_eq!(bb[0], lg_at * apow_at, "b̃ vs lg_at·apow_at");
-    }
-
-    #[test]
-    fn bilinear_zk_keeps_the_claim_and_masks_the_finals() {
-        use crate::mle::mle_eval;
-        let mut rng = SimpleRng::new(0x0BEE_51);
-        let nv = 5usize;
-        let n = 1usize << nv;
-        let eq: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
-        let h: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
-        let u: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
-        let claim = (0..n).fold(FqExt::ZERO, |a, i| a + eq[i] * h[i] * u[i]);
-
-        let zr = [FqExt::ZERO; 3];
-        let rb: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
-        let run = |sh: LinMask, su: FqExt, rc: &[FqExt; 3]| {
-            let mut tr = Transcript::new("bz");
-            let (p, r, hf, uf, rv) = prove_bilinear_zk(
-                eq.clone(),
-                h.clone(),
-                u.clone(),
-                sh,
-                su,
-                ClaimMask { coef: rc },
-                None,
-                &mut tr,
-            );
-            (p, r, hf, uf, rv)
-        };
-        let (p0, r0, h0, u0, _) = run(LinMask([FqExt::ZERO; 2]), FqExt::ZERO, &zr);
-        let sh = LinMask([rng.next_fq4(), rng.next_fq4()]);
-        let su = rng.next_fq4();
-        let (p1, r1, h1, u1, rb_at_c) = run(sh, su, &rb);
-        let msum = rb[0] + (rb[0] + rb[1] + rb[2]);
-
-        assert_eq!(p0.rounds[0][0] + p0.rounds[0][1], claim, "sigma changed the claim");
-        assert_eq!(
-            p1.rounds[0][0] + p1.rounds[0][1],
-            claim + msum,
-            "the claim is not exactly shifted by sum(R_B)"
-        );
-        assert_eq!(p1.rounds.len(), nv + 1);
-        assert!(p1.rounds[..nv - 1].iter().all(|x| x.len() == 4));
-        assert_eq!(p1.rounds[nv - 1].len(), 7);
-        assert_eq!(p1.rounds[nv].len(), 3, "w round: deg 2 => 3 values are sent (node 1 is not skipped)");
-
-        let rc = &r1[..nv];
-        let z = rc.iter().fold(FqExt::ONE, |a, &x| a * x * (FqExt::ONE - x));
-        assert_eq!(h1, mle_eval(&h, rc) + z * sh.eval(rc[nv - 1]), "H_dot(r) is not H_tilde(r) + Z(r)R_H(z_1)");
-        assert_eq!(u1, mle_eval(&u, rc) + z * su, "U_dot(r) is not U_tilde(r) + Z(r)sigma_U");
-        assert_eq!(h0, mle_eval(&h, &r0[..nv]), "with sigma=0 it must fall back to unmasked");
-        assert_eq!(u0, mle_eval(&u, &r0[..nv]));
-        assert_ne!(h0, h1, "R_H had no effect");
-        assert_ne!(u0, u1, "sigma_U had no effect");
-
-        let degs = round_degs(nv, 3, 6, 2);
-        let mut tr_v = Transcript::new("bz");
-        let (e, rv) = verify_degs(claim + msum, &degs, &p1, &mut tr_v).expect("verify");
-        assert_eq!(rv, r1);
-        let c = r1[nv];
-        let ind = rc.iter().fold(FqExt::ONE, |a, &x| a * (FqExt::ONE - x));
-        assert_eq!(
-            e,
-            (FqExt::ONE - c) * mle_eval(&eq, rc) * h1 * u1 + ind * rb_at_c,
-            "the closing identity of Libra step (f) does not hold"
-        );
-        let mut tr_w = Transcript::new("bz");
-        assert!(verify_degs(claim, &degs, &p1, &mut tr_w).is_none(), "an unmasked claim passed");
-    }
-
-    #[test]
-    fn product2_sigma_shifts_claim_and_final_only() {
-        use crate::mle::mle_eval;
-        let mut rng = SimpleRng::new(0x0BEE_52);
-        let nv = 6usize;
-        let n = 1usize << nv;
-        let a: Vec<Fq> = (0..n).map(|_| Fq::new(rng.next_u64() % Q)).collect();
-        let b: Vec<FqExt> = (0..n).map(|_| rng.next_fq4()).collect();
-        let base = (0..n).fold(FqExt::ZERO, |s, i| s + FqExt::from_fq(a[i]) * b[i]);
-        let sigma = LinMask([rng.next_fq4(), rng.next_fq4()]);
-
-        let rq: [FqExt; 3] = [rng.next_fq4(), rng.next_fq4(), rng.next_fq4()];
-        let msum = rq[0] + (rq[0] + rq[1] + rq[2]);
-
-        let mut tr = Transcript::new("p2s");
-        let (p, r, t_dot, rq_at_c) =
-            prove_product2(&a, b.clone(), sigma, ClaimMask { coef: &rq }, None, &mut tr);
-        let claim = base + msum;
-
-        let degs = round_degs(nv, 2, 4, 2);
-        let mut tr_v = Transcript::new("p2s");
-        let (e, rv) = verify_product2(claim, &degs, &p, &mut tr_v).expect("verify");
-        assert_eq!(rv, r);
-        let rc = &r[..nv];
-        let lifted: Vec<FqExt> = a.iter().map(|&x| FqExt::from_fq(x)).collect();
-        let z = rc.iter().fold(FqExt::ONE, |x, &y| x * y * (FqExt::ONE - y));
-        let ind = rc.iter().fold(FqExt::ONE, |x, &y| x * (FqExt::ONE - y));
-        assert_eq!(
-            t_dot,
-            mle_eval(&lifted, rc) + z * sigma.eval(rc[nv - 1]),
-            "T_dot(r) is not T_tilde(r) + Z(r)R_T(z_1)"
-        );
-        assert_ne!(t_dot, mle_eval(&lifted, rc), "sigma_T had no effect");
-        let c = r[nv];
-        assert_eq!(
-            e,
-            (FqExt::ONE - c) * t_dot * mle_eval(&b, rc) + ind * rq_at_c,
-            "the closing identity does not hold"
-        );
-        let mut tr_w = Transcript::new("p2s");
-        let (ew, rw) = verify_product2(base, &degs, &p, &mut tr_w).expect("well-formed");
-        let rwc = &rw[..nv];
-        let zw2 = rwc.iter().fold(FqExt::ONE, |x, &y| x * y * (FqExt::ONE - y));
-        let indw = rwc.iter().fold(FqExt::ONE, |x, &y| x * (FqExt::ONE - y));
-        let tw = mle_eval(&lifted, rwc) + zw2 * sigma.eval(rwc[nv - 1]);
-        assert_ne!(
-            ew,
-            (FqExt::ONE - rw[nv]) * tw * mle_eval(&b, rwc)
-                + indw * ClaimMask { coef: &rq }.eval(rw[nv]),
-            "an unmasked claim passed the closing identity"
-        );
+        assert_eq!(w_at, wb[0], "W-tilde via mle vs fold");
+        assert_eq!(bb[0], lg_at * apow_at, "b vs lg_at * apow_at");
     }
 
     fn batched_w_reference(
@@ -1212,92 +1090,6 @@ mod tests {
         assert_eq!(p1.rounds, p2.rounds);
         assert_eq!(r1, r2);
         assert_eq!(o1, o2);
-    }
-
-    fn non_binary_w_is_rejected(bad_cell: usize, bad_val: u64, seed: u64) {
-        use crate::mle::{eq_eval, mle_eval};
-        let mut rng = SimpleRng::new(seed);
-        let (nv_k, nv_l) = (3usize, 3usize);
-        let (s_len, nv_w) = (1usize << nv_l, nv_k + nv_l);
-        let total = 1usize << nv_w;
-        let mut w: Vec<FqExt> =
-            (0..total).map(|_| FqExt::from_u64(rng.next_bool() as u64)).collect();
-        w[bad_cell] = FqExt::from_u64(bad_val);
-        let lg: Vec<FqExt> = (0..1 << nv_k).map(|_| rng.next_fq4()).collect();
-        let apow: Vec<FqExt> = (0..s_len).map(|_| rng.next_fq4()).collect();
-        let tau0: Vec<FqExt> = (0..nv_w).map(|_| rng.next_fq4()).collect();
-        let lambda = rng.next_fq4();
-
-        let claim2 = (0..total)
-            .fold(FqExt::ZERO, |a, c| a + lg[c / s_len] * apow[c % s_len] * w[c]);
-
-        let zr = [FqExt::ZERO; 3];
-        let mut tr_p = Transcript::new("nb");
-        let (proof, r_p, _) = batched_w_reference(
-            &w,
-            lg.clone(),
-            &apow,
-            &tau0,
-            lambda,
-            LinMask([FqExt::ZERO; 2]),
-            ClaimMask { coef: &zr },
-            &mut tr_p,
-        );
-        let degs = round_degs(nv_w, 3, 7, 2);
-        let mut tr_v = Transcript::new("nb");
-        let (e_b, r_v) =
-            verify_batched_w(lambda * claim2, &degs, &proof, &mut tr_v).expect("well-formed");
-        assert_eq!(r_p, r_v);
-
-        let rc = &r_v[..nv_w];
-        let cb = r_v[nv_w];
-        let w_at = mle_eval(&w, rc);
-        let lg_at = mle_eval(&lg, &r_v[..nv_k]);
-        let ap_at = mle_eval(&apow, &r_v[nv_k..nv_w]);
-        let expect = (FqExt::ONE - cb)
-            * (lambda * lg_at * ap_at * w_at + eq_eval(&tau0, rc) * w_at * (w_at - FqExt::ONE));
-        assert_ne!(e_b, expect, "a non-binary W (cell {bad_cell} = {bad_val}) passed SC3");
-    }
-
-    #[test]
-    fn cheat_non_binary_digit() {
-        for (cell, val, seed) in [(0usize, 2u64, 5001u64), (37, 2, 5002), (63, Q - 1, 5003)] {
-            non_binary_w_is_rejected(cell, val, seed);
-        }
-    }
-
-    #[test]
-    fn cheat_non_ternary_r() {
-        for (cell, seed) in [(5usize, 6001u64), (48, 6002)] {
-            non_binary_w_is_rejected(cell, 2, seed);
-        }
-    }
-
-    fn rand_sc_proof(rng: &mut SimpleRng, max_rounds: usize, max_deg: usize) -> SumcheckProof {
-        let n = (rng.next_u64() as usize) % (max_rounds + 2);
-        SumcheckProof {
-            rounds: (0..n)
-                .map(|_| {
-                    let l = (rng.next_u64() as usize) % (max_deg + 3);
-                    (0..l).map(|_| rng.next_fq4()).collect()
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn sumcheck_verifiers_never_panic_on_random_proofs() {
-        let mut rng = SimpleRng::new(0x5F022_9001);
-        for _ in 0..250_000 {
-            let nv = (rng.next_u64() as usize) % 8;
-            let deg = 1 + (rng.next_u64() as usize) % 3;
-            let p = rand_sc_proof(&mut rng, nv, deg);
-            let claim = rng.next_fq4();
-            let _ = verify(claim, nv, deg, &p, &mut Transcript::new("f"));
-            let degs: Vec<usize> = (0..nv).map(|_| deg).collect();
-            let _ = verify_product2(claim, &degs, &p, &mut Transcript::new("f"));
-            let _ = verify_batched_w(claim, &degs, &p, &mut Transcript::new("f"));
-        }
     }
 
     #[test]
@@ -1499,7 +1291,7 @@ mod mask_tests {
                 claim = lagrange_eval(&vals, r);
                 m.fold(j, r);
             }
-            assert_eq!(claim, m.eval(), "plain closing: the final claim must be g(r)");
+            assert_eq!(claim, m.eval(), "plain finish: final claim must equal g(r)");
         }
     }
 

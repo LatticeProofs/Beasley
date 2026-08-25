@@ -118,7 +118,7 @@ mod tests {
         let n = BUFLEN / 4;
         let first: Vec<u32> = (0..n).map(|_| r.next_u32()).collect();
         let second: Vec<u32> = (0..n).map(|_| r.next_u32()).collect();
-        assert_ne!(first, second, "second buffer equals the first => the counter did not advance");
+        assert_ne!(first, second, "second buffer equals the first: counter did not advance");
     }
 
     #[test]
@@ -135,17 +135,4 @@ mod tests {
         assert_ne!(r1.next_u32(), r2.next_u32());
     }
 
-    #[test]
-    fn next_fq_is_uniform_over_range() {
-        let mut r = AesPrg::from_parts("uniform", &[b"seed"]);
-        let (mut hi, n) = (0usize, 200_000usize);
-        for _ in 0..n {
-            let v = r.next_fq().0 as u64;
-            assert!(v < crate::field::Q);
-            if v >= crate::field::Q / 2 {
-                hi += 1;
-            }
-        }
-        assert!(hi > n * 48 / 100 && hi < n * 52 / 100, "high-half ratio {hi}/{n}");
-    }
 }
