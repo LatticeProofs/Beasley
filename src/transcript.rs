@@ -1,3 +1,4 @@
+
 use crate::ext_field::FqExt;
 use crate::field::{fq_from_words, Fq, FQ_BYTES, Q};
 use crate::keccak::Shake128;
@@ -190,8 +191,23 @@ mod tests {
 
         assert_eq!(
             got, want,
-            "transcript canonical encoding changed; this invalidates all existing proofs, make sure it is intentional"
+            "the canonical encoding of the transcript changed -- this invalidates every existing proof, confirm that it is intentional"
         );
+    }
+
+    #[test]
+    fn challenges_are_uniform_over_fq() {
+        let mut t = Transcript::new("unif");
+        let mut hi = 0usize;
+        const N: usize = 20000;
+        for _ in 0..N {
+            let v = t.challenge_fq();
+            assert!((v.0 as u64) < Q);
+            if v.0 as u64 >= Q / 2 {
+                hi += 1;
+            }
+        }
+        assert!(hi > N * 45 / 100 && hi < N * 55 / 100, "skewed distribution: upper half {hi}/{N}");
     }
 
     #[test]
@@ -227,4 +243,13 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    #[test]
+    fn large_absorb_is_avalanche_sensitive() {
+        let big: Vec<Fq> = (0..5000u64).map(Fq::new).collect();
+        let base = ch(|t| t.absorb_fqs(&big));
+        let mut tweaked = big.clone();
+        tweaked[4999] = tweaked[4999] + Fq::ONE;
+        assert_ne!(base, ch(|t| t.absorb_fqs(&tweaked)));
+        assert_eq!(base, ch(|t| t.absorb_fqs(&big)));
+    }
 }

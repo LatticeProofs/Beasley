@@ -1,8 +1,1 @@
-# VOPRF
-
-## Benchmark
-
-```
-powershell -ExecutionPolicy Bypass -File script/bench_median.ps1
-```
-
+``powershell -ExecutionPolicy Bypass -File scripts/bench_median.ps1``

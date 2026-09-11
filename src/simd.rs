@@ -1,3 +1,4 @@
+
 use crate::bits::PackedBits;
 use crate::ext_field::{Fq2, FqExt, EXT_DEG};
 use crate::field::{reduce128, Fq, C, Q};
@@ -809,7 +810,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn avx2_primitives_match_scalar_on_adversarial_values() {
         if !have_avx2() {
-            eprintln!("skipped: AVX2 not available");
+            eprintln!("skipped: no AVX2 on this machine");
             return;
         }
         let edge: Vec<u64> = vec![
@@ -861,7 +862,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn avx2_kernels_match_scalar() {
         if !have_avx2() {
-            eprintln!("skipped: AVX2 not available");
+            eprintln!("skipped: no AVX2 on this machine");
             return;
         }
         let mut rng = SimpleRng::new(20260802);
@@ -933,7 +934,7 @@ mod tests {
                 batched_phase_a_round_scalar(
                     &w_bits, &apow, &ea, &eb, &lg, cells, s_len, 0, k_len
                 ),
-                "round0 specialization disagrees with the general round k={k_len} s={s_len}"
+                "the round0 specialization disagrees with the generic round k={k_len} s={s_len}"
             );
         }
     }

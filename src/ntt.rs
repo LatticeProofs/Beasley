@@ -1,5 +1,6 @@
+
 use crate::field::{Fq, Q};
-use crate::ring::{RingElem, GADGET_BASE, N};
+use crate::ring::{RingElem, N};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 use tfhe_ntt::prime32::Plan;
@@ -13,7 +14,7 @@ const _: () = assert!(L.is_power_of_two());
 const _: () = {
     let mut i = 0;
     while i < PRIMES.len() {
-        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "prime does not support a negacyclic-L NTT");
+        assert!((PRIMES[i] - 1) % (2 * L as u64) == 0, "the primes cannot support a negacyclic-L NTT");
         i += 1;
     }
 };
@@ -45,14 +46,16 @@ fn fwd_into(a: &[Fq], p: u64, plan: &Plan, buf: &mut [u32]) {
 }
 
 fn fwd_small_into(a: &[Fq], plan: &Plan, buf: &mut [u32]) {
-    const _: () = assert!(GADGET_BASE <= PRIMES[0], "digits must be < every RNS prime to skip the % p reduction");
+    const _: () = assert!(SMALL_BOUND <= PRIMES[0], "small inputs must be < every RNS prime so that the % p can be skipped");
     buf.fill(0);
     for (i, &v) in a.iter().enumerate() {
-        debug_assert!((v.0 as u64) < GADGET_BASE);
+        debug_assert!((v.0 as u64) < SMALL_BOUND, "the coefficients of small inputs must be < {SMALL_BOUND}");
         buf[i] = v.0 as u32;
     }
     plan.fwd(buf);
 }
+
+pub const SMALL_BOUND: u64 = crate::ring::W_RANGE_BASE;
 
 macro_rules! with_prime {
     ($pi:expr, $p:ident, $body:block) => {
@@ -77,7 +80,7 @@ macro_rules! with_prime {
                 const $p: u64 = PRIMES[4];
                 $body
             }
-            other => unreachable!("with_prime!: only {} primes, got index {}", NPRIMES, other),
+            other => unreachable!("with_prime!: PRIMES only has {} entries, got index {}", NPRIMES, other),
         }
     };
 }
@@ -169,13 +172,13 @@ fn crt_modq<const K: usize>(r: [u64; K]) -> Fq {
 }
 
 const _: () = {
-    assert!(M_MOD_Q[0] == 1, "mixed-radix weight 0 must be 1");
+    assert!(M_MOD_Q[0] == 1, "the 0th weight of the mixed radix must be 1");
     let mut i = 0;
     while i < NPRIMES {
-        assert!(PRIMES[i] < Q, "RNS primes must be < q (term 0 skips reduction)");
+        assert!(PRIMES[i] < Q, "RNS primes must be < q (precondition for the reduction-free 0th term)");
         let mut j = 0;
         while j < NPRIMES {
-            assert!(PRIMES[j] < 2 * PRIMES[i], "primes must be within a factor of 2 of each other (single conditional subtraction)");
+            assert!(PRIMES[j] < 2 * PRIMES[i], "the primes differ by less than a factor of 2 (precondition for a single conditional subtraction)");
             j += 1;
         }
         i += 1;
@@ -194,29 +197,41 @@ fn crt_gen_modq(r: [u64; NGEN]) -> Fq {
 
 #[derive(Clone)]
 pub struct Spectra {
-    fwd: [Vec<u32>; NHOT],
-    shoup: [Vec<u32>; NHOT],
+    pub(crate) fwd: [Vec<u32>; NHOT],
+    pub(crate) shoup: [Vec<u32>; NHOT],
 }
 
 pub fn to_spectra(a: &[Fq]) -> Spectra {
+    to_spectra_impl::<false>(a)
+}
+
+pub fn to_spectra_bin(a: &[Fq]) -> Spectra {
+    to_spectra_impl::<true>(a)
+}
+
+fn to_spectra_impl<const SMALL: bool>(a: &[Fq]) -> Spectra {
     let e = Engine::get();
     let mut fwd: [Vec<u32>; NHOT] = Default::default();
     let mut shoup: [Vec<u32>; NHOT] = Default::default();
     let mut buf = vec![0u32; L];
     for pi in 0..NHOT {
-        fwd_into(a, PRIMES[pi], &e.plans[pi], &mut buf);
+        if SMALL {
+            fwd_small_into(a, &e.plans[pi], &mut buf);
+        } else {
+            fwd_into(a, PRIMES[pi], &e.plans[pi], &mut buf);
+        }
         shoup[pi] = with_prime!(pi, P, { buf.iter().map(|&w| shoup_pre(w, P)).collect() });
         fwd[pi] = buf.clone();
     }
     Spectra { fwd, shoup }
 }
 
-fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
+fn inner_full_mixed<const SMALL_COLS: bool>(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
     let e = Engine::get();
     assert!(cols.len() <= specs.len());
     debug_assert!(
-        cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE); the NHOT-prime RNS bound relies on this"
+        !SMALL_COLS || cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < SMALL_BOUND)),
+        "hot-path precondition: under SMALL_COLS the coefficients of cols must be bits -- the RNS bound for NHOT primes depends on it"
     );
 
     let res: Vec<Vec<u32>> = (0..NHOT)
@@ -230,7 +245,11 @@ fn inner_full_binary(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
                     .fold(
                         || (vec![0u64; L], vec![0u32; L]),
                         |(mut acc, mut cf), (d, col)| {
-                            fwd_small_into(&col.c, plan, &mut cf);
+                            if SMALL_COLS {
+                                fwd_small_into(&col.c, plan, &mut cf);
+                            } else {
+                                fwd_into(&col.c, P, plan, &mut cf);
+                            }
                             let sf = &specs[d].fwd[pi];
                             let sh = &specs[d].shoup[pi];
                             for i in 0..L {
@@ -293,14 +312,14 @@ fn fold_neg(full: &[Fq]) -> Vec<Fq> {
     c
 }
 pub fn neg_and_quotient(specs: &[Spectra], cols: &[RingElem]) -> (RingElem, Vec<Fq>) {
-    let full = inner_full_binary(specs, cols);
+    let full = inner_full_mixed::<true>(specs, cols);
     let neg = fold_neg(&full);
     let t: Vec<Fq> = full[N..].iter().map(|&v| -v).collect();
     (RingElem { c: neg }, t)
 }
 
 pub fn full_inner_product(specs: &[Spectra], cols: &[RingElem]) -> Vec<Fq> {
-    inner_full_binary(specs, cols)
+    inner_full_mixed::<true>(specs, cols)
 }
 
 pub fn neg_and_quotient_rows(
@@ -308,12 +327,28 @@ pub fn neg_and_quotient_rows(
     rows: usize,
     cols: &[RingElem],
 ) -> Vec<(RingElem, Vec<Fq>)> {
+    neg_and_quotient_rows_impl::<true>(specs, rows, cols)
+}
+
+pub fn neg_and_quotient_rows_wide(
+    specs: &[Spectra],
+    rows: usize,
+    cols: &[RingElem],
+) -> Vec<(RingElem, Vec<Fq>)> {
+    neg_and_quotient_rows_impl::<false>(specs, rows, cols)
+}
+
+fn neg_and_quotient_rows_impl<const SMALL_COLS: bool>(
+    specs: &[Spectra],
+    rows: usize,
+    cols: &[RingElem],
+) -> Vec<(RingElem, Vec<Fq>)> {
     let e = Engine::get();
     let ml = cols.len();
-    assert_eq!(specs.len(), rows * ml, "specs must be rows x ml (row-major)");
+    assert_eq!(specs.len(), rows * ml, "specs must be rows × K (row-major)");
     debug_assert!(
-        cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < GADGET_BASE)),
-        "hot-path precondition: right-operand coefficients must be gadget digits (< GADGET_BASE)"
+        !SMALL_COLS || cols.iter().all(|c| c.c.iter().all(|v| (v.0 as u64) < SMALL_BOUND)),
+        "hot-path precondition: under SMALL_COLS the coefficients of cols must be bits"
     );
 
     let res: Vec<Vec<Vec<u32>>> = (0..NHOT)
@@ -325,7 +360,11 @@ pub fn neg_and_quotient_rows(
                     .iter()
                     .map(|col| {
                         let mut buf = vec![0u32; L];
-                        fwd_small_into(&col.c, plan, &mut buf);
+                        if SMALL_COLS {
+                            fwd_small_into(&col.c, plan, &mut buf);
+                        } else {
+                            fwd_into(&col.c, P, plan, &mut buf);
+                        }
                         buf
                     })
                     .collect();
@@ -383,7 +422,6 @@ pub fn mul_polys(a: &[Fq], b: &[Fq]) -> Vec<Fq> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ring::GADGET_LEN;
     use crate::transcript::SimpleRng;
 
     fn random_poly(rng: &mut SimpleRng, len: usize) -> Vec<Fq> {
@@ -409,7 +447,7 @@ mod tests {
             let p = PRIMES[pi];
             let check = |w: u64, x: u64| {
                 let r = shoup_mul_lazy(w as u32, shoup_pre(w as u32, p), x as u32, p);
-                assert!(r < 2 * p, "lazy result must be < 2p (p{pi}, w={w}, x={x})");
+                assert!(r < 2 * p, "the lazy result must be < 2p (p{pi}, w={w}, x={x})");
                 assert_eq!(r % p, w * x % p, "p{pi}, w={w}, x={x}");
             };
             for (w, x) in [(0u64, 0u64), (0, p - 1), (p - 1, 0), (p - 1, p - 1), (1, p - 1)] {
@@ -424,7 +462,7 @@ mod tests {
     #[test]
     fn ntt_length_is_exactly_2n() {
         assert_eq!(L, 2 * N);
-        assert!(L.is_power_of_two(), "L is not a power of two: tfhe-ntt Plan cannot be built");
+        assert!(L.is_power_of_two(), "L is not a power of two => the tfhe-ntt Plan cannot be built");
         for (i, &p) in PRIMES.iter().enumerate() {
             assert_eq!((p - 1) % (2 * L as u64), 0, "p{i} = {p} does not support negacyclic-{L}");
             assert!(Plan::try_new(L, p as u32).is_some(), "Plan({L}) for p{i} cannot be built");
@@ -467,38 +505,121 @@ mod tests {
     }
 
     #[test]
-    fn worst_case_binary_rns_bound_is_exact() {
-        let dmax = (GADGET_BASE - 1) as u32;
-        let maxdig = RingElem { c: vec![Fq(dmax as _); N] };
+    fn worst_case_mixed_rns_bound_is_exact() {
+        const K_EVAL_H: usize = crate::params::ELL;
+        const K_LIN: usize = 10;
+        const K_COMMIT: usize = 30;
+        let k_max = K_EVAL_H.max(K_LIN).max(K_COMMIT);
+        assert_eq!(k_max, 30);
+
+        let ones = RingElem { c: vec![Fq::ONE; N] };
         let maxv = vec![Fq((Q - 1) as _); N];
-        let ml = crate::params::ELL * GADGET_LEN;
-        let specs: Vec<Spectra> = (0..ml).map(|_| to_spectra(&maxv)).collect();
-        let cols: Vec<RingElem> = (0..ml).map(|_| maxdig.clone()).collect();
 
-        let got = full_inner_product(&specs, &cols);
-        let qm1 = (Q - 1) as u128;
-        let dm = (GADGET_BASE - 1) as u128;
-        let mut peak = 0u128;
-        for k in 0..2 * N - 1 {
-            let pairs = (k.min(N - 1) - k.saturating_sub(N - 1) + 1) as u128;
-            let exact = ml as u128 * dm * qm1 * pairs;
-            peak = peak.max(exact);
-            assert_eq!(got[k].0 as u128, exact % Q as u128, "k = {k}");
-        }
-        assert_eq!(peak, ml as u128 * dm * qm1 * N as u128);
-        let modulus: u128 = (0..NHOT).map(|i| PRIMES[i] as u128).product();
-        assert!(peak < modulus, "{NHOT}-prime bound insufficient: peak = {peak}, prod = {modulus}");
-        let bits = 128 - peak.leading_zeros();
-        let doc_bits = 87;
-        assert_eq!(bits, doc_bits, "bound is not 2^{doc_bits}: got 2^{bits}");
+        for small_cols in [true, false] {
+            let (specs, cols): (Vec<Spectra>, Vec<RingElem>) = if small_cols {
+                (
+                    (0..k_max).map(|_| to_spectra(&maxv)).collect(),
+                    (0..k_max).map(|_| ones.clone()).collect(),
+                )
+            } else {
+                (
+                    (0..k_max).map(|_| to_spectra_bin(&ones.c)).collect(),
+                    (0..k_max).map(|_| RingElem { c: maxv.clone() }).collect(),
+                )
+            };
+            let got = if small_cols {
+                full_inner_product(&specs, &cols)
+            } else {
+                let r = neg_and_quotient_rows_wide(&specs, 1, &cols);
+                let _ = &r;
+                inner_full_mixed::<false>(&specs, &cols)
+            };
 
-        let (neg, t) = neg_and_quotient(&specs, &cols);
-        for i in 0..N {
-            let hi = if N + i < 2 * N - 1 { got[N + i] } else { Fq::ZERO };
-            assert_eq!(neg.c[i], got[i] - hi);
+            let qm1 = (Q - 1) as u128;
+            let mut peak = 0u128;
+            for k in 0..2 * N - 1 {
+                let pairs = (k.min(N - 1) - k.saturating_sub(N - 1) + 1) as u128;
+                let exact = k_max as u128 * qm1 * pairs;
+                peak = peak.max(exact);
+                assert_eq!(got[k].0 as u128, exact % Q as u128, "small_cols={small_cols} k={k}");
+            }
+            assert_eq!(peak, k_max as u128 * qm1 * N as u128);
+
+            let modulus: u128 = (0..NHOT).map(|i| PRIMES[i] as u128).product();
+            assert!(peak < modulus, "the bound for {NHOT} primes is too small: peak = {peak}, Pi p = {modulus}");
+
+            let bits = 128 - peak.leading_zeros();
+            assert_eq!(bits, 78, "the upper bound is not 2^77.9 (the table in the `ntt.rs` module documentation must be kept in sync): 2^{bits}");
+            let margin_bits = (128 - modulus.leading_zeros()) - bits;
+            assert!(margin_bits >= 15, "only 2^{margin_bits} of RNS headroom left");
         }
-        for (i, &v) in t.iter().enumerate() {
-            assert_eq!(v, -got[N + i]);
+    }
+
+    #[test]
+    fn to_spectra_bin_matches_general_on_bits() {
+        let mut rng = SimpleRng::new(0xB17);
+        for _ in 0..8 {
+            let bits = random_bits(&mut rng, N);
+            let a = to_spectra(&bits);
+            let b = to_spectra_bin(&bits);
+            for pi in 0..NHOT {
+                assert_eq!(a.fwd[pi], b.fwd[pi], "fwd differs for prime {pi}");
+                assert_eq!(a.shoup[pi], b.shoup[pi], "shoup differs for prime {pi}");
+            }
+        }
+    }
+
+    #[test]
+    fn both_small_sides_agree() {
+        let mut rng = SimpleRng::new(0x5DE);
+        let k = 5;
+        let wide: Vec<Vec<Fq>> = (0..k).map(|_| random_poly(&mut rng, N)).collect();
+        let bits: Vec<RingElem> =
+            (0..k).map(|_| RingElem { c: random_bits(&mut rng, N) }).collect();
+
+        let sa: Vec<Spectra> = wide.iter().map(|p| to_spectra(p)).collect();
+        let a = inner_full_mixed::<true>(&sa, &bits);
+
+        let sb: Vec<Spectra> = bits.iter().map(|b| to_spectra_bin(&b.c)).collect();
+        let cb: Vec<RingElem> = wide.iter().map(|p| RingElem { c: p.clone() }).collect();
+        let b = inner_full_mixed::<false>(&sb, &cb);
+
+        assert_eq!(a, b, "the inner products of the two directions disagree (did fwd_small_into swap the operands?)");
+
+        let mut refv = vec![Fq::ZERO; 2 * N - 1];
+        for d in 0..k {
+            for (i, &v) in schoolbook_full(&wide[d], &bits[d].c).iter().enumerate() {
+                refv[i] = refv[i] + v;
+            }
+        }
+        assert_eq!(a, refv);
+    }
+
+    #[test]
+    fn wide_rows_match_schoolbook() {
+        use crate::ring::reduce_only;
+        let mut rng = SimpleRng::new(0x71D);
+        let (rows, k) = (5usize, 5usize);
+        let abin: Vec<RingElem> =
+            (0..rows * k).map(|_| RingElem { c: random_bits(&mut rng, N) }).collect();
+        let specs: Vec<Spectra> = abin.iter().map(|e| to_spectra_bin(&e.c)).collect();
+        let cols: Vec<RingElem> =
+            (0..k).map(|_| RingElem { c: random_poly(&mut rng, N) }).collect();
+
+        let out = neg_and_quotient_rows_wide(&specs, rows, &cols);
+        assert_eq!(out.len(), rows);
+        for r in 0..rows {
+            let mut full = vec![Fq::ZERO; 2 * N - 1];
+            for d in 0..k {
+                for (i, &v) in schoolbook_full(&abin[r * k + d].c, &cols[d].c).iter().enumerate() {
+                    full[i] = full[i] + v;
+                }
+            }
+            assert_eq!(out[r].0, reduce_only(&full), "reduced value of row {r}");
+            assert_eq!(out[r].1.len(), N - 1);
+            for (i, &v) in out[r].1.iter().enumerate() {
+                assert_eq!(v, -full[N + i], "quotient of row {r} (the protocol convention is -hi)");
+            }
         }
     }
 
@@ -526,7 +647,7 @@ mod tests {
         let iters = 3000;
         let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / iters as f64;
 
-        println!("\n--- NTT forward microbench ({iters}-iter average, single prime; current L = {L}) ---");
+        println!("\n--- NTT forward microbenchmark (average over {iters} runs, single prime; currently L = {L}) ---");
         for len in [512usize, 1024, 2048, 4096] {
             let Some(plan) = Plan::try_new(len, p) else {
                 println!("  L = {len:<5}   (p = {p} does not support negacyclic-{len}, skipped)");
@@ -538,20 +659,20 @@ mod tests {
                 plan.fwd(&mut buf);
             }
             let d = t.elapsed();
-            println!("  L = {len:<5}{:8.3} us{}", per(d), if len == L { "   <- current" } else { "" });
+            println!("  L = {len:<5}{:8.3} us{}", per(d), if len == L { "   ← current" } else { "" });
         }
     }
 
     #[test]
     #[ignore]
     fn ntt_innerfull_breakdown() {
-
+        const BENCH_K: usize = crate::params::ELL;
         use std::time::Instant;
         let mut rng = SimpleRng::new(9);
-        let a: Vec<Vec<Fq>> = (0..GADGET_LEN).map(|_| random_poly(&mut rng, N)).collect();
-        let cols: Vec<RingElem> = (0..GADGET_LEN)
+        let a: Vec<Vec<Fq>> = (0..BENCH_K).map(|_| random_poly(&mut rng, N)).collect();
+        let cols: Vec<RingElem> = (0..BENCH_K)
             .map(|_| RingElem {
-                c: (0..N).map(|_| Fq((rng.next_u64() % GADGET_BASE) as _)).collect(),
+                c: (0..N).map(|_| Fq((rng.next_u64() % SMALL_BOUND) as _)).collect(),
             })
             .collect();
 
@@ -569,25 +690,25 @@ mod tests {
 
         let e = Engine::get();
         let mut buf = vec![0u32; L];
-        let nfwd = NHOT * (GADGET_LEN + 1);
+        let nfwd = NHOT * (BENCH_K + 1);
         let t = Instant::now();
         for _ in 0..nfwd {
             e.plans[0].fwd(&mut buf);
         }
         let t_ntt = t.elapsed().as_secs_f64() * 1e6;
 
-        println!("\n--- inner_full breakdown (delta={GADGET_LEN} columns, bit right operand, {NHOT} primes) ---");
+        println!("\n--- inner_full breakdown (delta={BENCH_K} columns, right operand is bits, {NHOT} primes) ---");
         println!(
-            "  to_spectra x {GADGET_LEN} (incl. {NHOT} primes + Shoup)  {:9.1} us  ({:.1} us each)",
+            "  to_spectra x {BENCH_K} (incl. {NHOT} primes + Shoup)  {:9.1} us  ({:.1} us each)",
             t_spec.as_secs_f64() * 1e6,
-            t_spec.as_secs_f64() * 1e6 / GADGET_LEN as f64
+            t_spec.as_secs_f64() * 1e6 / BENCH_K as f64
         );
         println!(
-            "  neg_and_quotient single call ({} threads)  {:9.1} us",
+            "  neg_and_quotient, one call ({} threads)  {:9.1} us",
             rayon::current_num_threads(),
             t_call
         );
-        println!("  reference: {nfwd} {L}-NTTs (single thread, sequential)  {:9.1} us", t_ntt);
-        println!("  pointwise MAC count: {NHOT} primes x {GADGET_LEN} cols x {L} points = {}\n", NHOT * GADGET_LEN * L);
+        println!("  reference: {nfwd} {L}-NTTs (single-threaded, sequential)  {:9.1} us", t_ntt);
+        println!("  pointwise MAC volume: {NHOT} primes x {BENCH_K} cols x {L} points = {} ops\n", NHOT * BENCH_K * L);
     }
 }

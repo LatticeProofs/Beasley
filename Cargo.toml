@@ -1,12 +1,11 @@
 [package]
-name = "VOPRF"
+name = "OPAQUE"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 tfhe-ntt = "0.7.1"
 rayon = "1"
-
 keccak = "0.1"
 aes = "0.8"
 ctr = "0.9"
@@ -15,7 +14,7 @@ ctr = "0.9"
 opt-level = 2
 
 [lib]
-name = "voprf"
+name = "blmr"
 path = "src/lib.rs"
 
 [[bin]]

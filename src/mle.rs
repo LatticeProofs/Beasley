@@ -1,3 +1,4 @@
+
 use crate::ext_field::FqExt;
 
 pub fn mle_eval(table: &[FqExt], point: &[FqExt]) -> FqExt {

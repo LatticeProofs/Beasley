@@ -1,7 +1,8 @@
+
 use crate::ext_field::{FqExt, EXT_DEG};
 use crate::field::{fq_le_bytes, Fq, FQ_BYTES};
 use crate::pcs::Commitment;
-use crate::proof::Proof;
+use crate::proof::{pub_scalars, Proof};
 use crate::sumcheck::SumcheckProof;
 
 pub const FQ4_BYTES: usize = EXT_DEG * FQ_BYTES;
@@ -12,7 +13,9 @@ const DIGEST_BYTES: usize = 8;
 
 const NUM_VARS_BYTES: usize = 4;
 
-const N_PUB_SCALARS: usize = 7 + 3 + 4 + 4;
+const N_SUMCHECKS: usize = 4;
+
+const N_COMMITMENTS: usize = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProofBytes {
@@ -137,29 +140,29 @@ impl<'a> Reader<'a> {
 impl Proof {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        for sc in [&self.sc1_bilinear, &self.sc_quotient, &self.sc_batched, &self.sc5_onehot] {
+        for sc in [&self.sc1, &self.sc_full, &self.sc_bin, &self.sc5] {
             w.sumcheck(sc);
         }
         for v in pub_scalars(self) {
             w.fq4(v);
         }
-        w.commitment(&self.c_w);
-        w.commitment(&self.c_t);
+        w.commitment(&self.c);
         w.out
     }
 
     pub fn from_bytes(buf: &[u8]) -> Option<Proof> {
         let cap = buf.len() / FQ4_BYTES + 1;
         let mut r = Reader::new(buf);
-        let sc1_bilinear = r.sumcheck(cap)?;
-        let sc_quotient = r.sumcheck(cap)?;
-        let sc_batched = r.sumcheck(cap)?;
-        let sc5_onehot = r.sumcheck(cap)?;
+        let sc1 = r.sumcheck(cap)?;
+        let sc_full = r.sumcheck(cap)?;
+        let sc_bin = r.sumcheck(cap)?;
+        let sc5 = r.sumcheck(cap)?;
         let s1 = r.fq4()?;
         let q_claim = r.fq4()?;
+        let claim_bin = r.fq4()?;
         let u_final = r.fq4()?;
-        let open_w = r.fq4()?;
-        let open_t = r.fq4()?;
+        let open_bin = r.fq4()?;
+        let open_full = r.fq4()?;
         let open_h_sc1 = r.fq4()?;
         let open_h_sum = r.fq4()?;
         let mut mask_r_evals = [FqExt::ZERO; 3];
@@ -174,84 +177,55 @@ impl Proof {
         for v in mask_evals.iter_mut() {
             *v = r.fq4()?;
         }
-        let c_w = r.commitment()?;
-        let c_t = r.commitment()?;
+        let c = r.commitment()?;
         if r.at != buf.len() {
             return None;
         }
         Some(Proof {
-            c_w,
-            c_t,
+            c,
             s1,
             q_claim,
+            claim_bin,
             u_final,
-            open_w,
-            open_t,
+            open_bin,
+            open_full,
             open_h_sc1,
             open_h_sum,
             mask_r_evals,
-            sc1_bilinear,
-            sc_quotient,
-            sc_batched,
-            sc5_onehot,
+            sc1,
+            sc_full,
+            sc_bin,
+            sc5,
             mask_totals,
             mask_evals,
         })
     }
 
     pub fn size_breakdown(&self) -> ProofBytes {
-        let scs = [&self.sc1_bilinear, &self.sc_quotient, &self.sc_batched, &self.sc5_onehot];
-        let sc_vals: usize = scs.iter().map(|p| p.rounds.iter().map(|r| r.len()).sum::<usize>()).sum();
+        let scs = [&self.sc1, &self.sc_full, &self.sc_bin, &self.sc5];
+        let sc_vals: usize =
+            scs.iter().map(|p| p.rounds.iter().map(|r| r.len()).sum::<usize>()).sum();
         let sc_rounds: usize = scs.iter().map(|p| p.rounds.len()).sum();
+        debug_assert_eq!(scs.len(), N_SUMCHECKS);
         ProofBytes {
             sumcheck: sc_vals * FQ4_BYTES,
             public_scalars: pub_scalars(self).len() * FQ4_BYTES,
             framing: (scs.len() + sc_rounds) * LEN_BYTES,
-            commitments_stub: 2 * (DIGEST_BYTES + NUM_VARS_BYTES),
+            commitments_stub: N_COMMITMENTS * (DIGEST_BYTES + NUM_VARS_BYTES),
         }
     }
-
-    pub fn num_rounds(&self) -> usize {
-        [&self.sc1_bilinear, &self.sc_quotient, &self.sc_batched, &self.sc5_onehot]
-            .iter()
-            .map(|p| p.rounds.len())
-            .sum()
-    }
-}
-
-fn pub_scalars(p: &Proof) -> [FqExt; N_PUB_SCALARS] {
-    [
-        p.s1,
-        p.q_claim,
-        p.u_final,
-        p.open_w,
-        p.open_t,
-        p.open_h_sc1,
-        p.open_h_sum,
-        p.mask_r_evals[0],
-        p.mask_r_evals[1],
-        p.mask_r_evals[2],
-        p.mask_totals[0],
-        p.mask_totals[1],
-        p.mask_totals[2],
-        p.mask_totals[3],
-        p.mask_evals[0],
-        p.mask_evals[1],
-        p.mask_evals[2],
-        p.mask_evals[3],
-    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hash::bits_to_groups;
-    use crate::nizk1::{sample_blind, Nizk1Params, QueryCounter};
+    use crate::nizk1::{sample_blind, BlindStatement, Nizk1Params, QueryCounter};
     use crate::params::HashParams;
-    use crate::proof::{proof_fingerprint, prove_nizk1, verify_nizk1};
+    use crate::proof::{proof_fingerprint, prove_nizk1, verify_nizk1, N_PUB_SCALARS};
     use crate::rng::insecure_test_secret;
 
-    fn sample_proof(seed: u64) -> (HashParams, Nizk1Params, crate::nizk1::BlindStatement, Proof) {
+    fn sample_proof(seed: u64) -> (HashParams, Nizk1Params, BlindStatement, Proof) {
         let params = HashParams::sample(seed, 8, 2, 1);
         let nz = Nizk1Params::sample(seed + 1, &params, 3, 2, 2);
         let bits: Vec<bool> = (0..8).map(|i| (seed >> i) & 1 == 1).collect();
@@ -266,14 +240,14 @@ mod tests {
     fn roundtrip_is_bit_exact_and_still_verifies() {
         let (params, nz, st, proof) = sample_proof(1300);
         let bytes = proof.to_bytes();
-        let back = Proof::from_bytes(&bytes).expect("valid encoding failed to decode");
+        let back = Proof::from_bytes(&bytes).expect("a valid encoding unexpectedly failed to decode");
         assert_eq!(
             proof_fingerprint(&proof),
             proof_fingerprint(&back),
-            "fingerprint changed after roundtrip: a field is missing from the encoding"
+            "the fingerprint differs after a roundtrip ⇒ some field is missing from the encoding"
         );
-        assert_eq!(back.to_bytes(), bytes, "re-encoding must be byte-identical");
-        assert!(verify_nizk1(&params, &nz, &st, &back), "decoded proof failed to verify");
+        assert_eq!(back.to_bytes(), bytes, "re-encoding must produce exactly the same bytes");
+        assert!(verify_nizk1(&params, &nz, &st, &back), "the decoded proof failed to verify");
     }
 
     #[test]
@@ -284,8 +258,52 @@ mod tests {
             assert_eq!(proof.to_bytes().len(), b.total(), "seed {seed}");
             assert_eq!(b.transcript(), b.sumcheck + b.public_scalars);
             assert_eq!(FQ4_BYTES, 16);
-            assert_eq!(b.public_scalars, 18 * FQ4_BYTES);
+            assert_eq!(N_PUB_SCALARS, 19);
+            assert_eq!(b.public_scalars, N_PUB_SCALARS * FQ4_BYTES);
+            assert_eq!(b.framing % LEN_BYTES, 0);
+            assert_eq!(b.framing / LEN_BYTES, N_SUMCHECKS + proof.num_rounds());
+            assert_eq!(b.commitments_stub, N_COMMITMENTS * (DIGEST_BYTES + NUM_VARS_BYTES));
         }
     }
 
+    #[test]
+    fn malformed_bytes_are_rejected_not_panicked() {
+        let (_, _, _, proof) = sample_proof(1320);
+        let good = proof.to_bytes();
+
+        assert!(Proof::from_bytes(&[]).is_none(), "empty input");
+        for cut in [1usize, 4, 17, 100, good.len() - 1] {
+            assert!(Proof::from_bytes(&good[..cut]).is_none(), "truncating to {cut} unexpectedly passed");
+        }
+        let mut tail = good.clone();
+        tail.push(0);
+        assert!(Proof::from_bytes(&tail).is_none(), "one extra byte unexpectedly passed");
+        let mut huge = good.clone();
+        huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Proof::from_bytes(&huge).is_none(), "a round count of u32::MAX unexpectedly passed");
+        let mut bad = good.clone();
+        let off = 4 + 4;
+        bad[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(Proof::from_bytes(&bad).is_none(), "a non-reduced Fq unexpectedly passed");
+    }
+
+    #[test]
+    fn every_byte_is_load_bearing() {
+        let (_, _, _, proof) = sample_proof(1330);
+        let good = proof.to_bytes();
+        let fp = proof_fingerprint(&proof);
+        let step = (good.len() / 64).max(1);
+        for i in (0..good.len()).step_by(step) {
+            let mut b = good.clone();
+            b[i] ^= 0x01;
+            match Proof::from_bytes(&b) {
+                None => {}
+                Some(p) => assert_ne!(
+                    proof_fingerprint(&p),
+                    fp,
+                    "flipping byte {i} left the fingerprint unchanged ⇒ that byte is not covered by the fingerprint"
+                ),
+            }
+        }
+    }
 }

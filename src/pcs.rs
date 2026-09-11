@@ -1,3 +1,4 @@
+
 use crate::bits::PackedBits;
 use crate::ext_field::FqExt;
 use crate::field::Fq;
@@ -87,6 +88,10 @@ pub fn open_linear_bits(table: &PackedBits, weights: &[(usize, FqExt)]) -> FqExt
     weights
         .iter()
         .fold(FqExt::ZERO, |acc, &(i, w)| if table.get(i) { acc + w } else { acc })
+}
+
+pub fn open_linear_fq(table: &[Fq], weights: &[(usize, FqExt)]) -> FqExt {
+    weights.iter().fold(FqExt::ZERO, |acc, &(i, w)| acc + w * FqExt::from_fq(table[i]))
 }
 
 pub fn verify_linear(_c: &Commitment, _weights: &[(usize, FqExt)], _value: FqExt) -> bool {

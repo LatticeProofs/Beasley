@@ -1,3 +1,4 @@
+
 use crate::field::Fq;
 use aes::Aes128;
 use ctr::cipher::{KeyIvInit, StreamCipher};
@@ -11,6 +12,8 @@ pub struct AesPrg {
     ciph: Aes128Ctr,
     buf: [u8; BUFLEN],
     pos: usize,
+    bitbuf: u64,
+    bitcnt: u32,
 }
 
 impl AesPrg {
@@ -37,6 +40,8 @@ impl AesPrg {
             ciph: Aes128Ctr::new(&key.into(), &iv.into()),
             buf: [0u8; BUFLEN],
             pos: BUFLEN,
+            bitbuf: 0,
+            bitcnt: 0,
         }
     }
 
@@ -60,6 +65,18 @@ impl AesPrg {
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
         (self.next_u32() as u64) | ((self.next_u32() as u64) << 32)
+    }
+
+    #[inline]
+    pub fn next_bool(&mut self) -> bool {
+        if self.bitcnt == 0 {
+            self.bitbuf = self.next_u64();
+            self.bitcnt = 64;
+        }
+        let b = self.bitbuf & 1 == 1;
+        self.bitbuf >>= 1;
+        self.bitcnt -= 1;
+        b
     }
 
     #[inline]
@@ -97,6 +114,22 @@ mod tests {
     }
 
     #[test]
+    fn next_bool_matches_next_u64_bit_order() {
+        let key = [0x11u8; 16];
+        let mut a = AesPrg::from_key_nonce(key, 7);
+        let mut b = AesPrg::from_key_nonce(key, 7);
+        for _ in 0..4 {
+            let w = a.next_u64();
+            for k in 0..64 {
+                assert_eq!(b.next_bool(), (w >> k) & 1 == 1, "bit {k}");
+            }
+        }
+        let mut r = AesPrg::from_key_nonce([0x99u8; 16], 1);
+        let ones = (0..20000).filter(|_| r.next_bool()).count();
+        assert!(ones > 9000 && ones < 11000, "next_bool imbalanced: {ones}/20000");
+    }
+
+    #[test]
     fn keystream_regression() {
         let mut r = AesPrg::from_key_nonce([0x5au8; 16], 0x0123_4567_89ab_cdef);
         let got: Vec<u32> = (0..12).map(|_| r.next_u32()).collect();
@@ -118,7 +151,7 @@ mod tests {
         let n = BUFLEN / 4;
         let first: Vec<u32> = (0..n).map(|_| r.next_u32()).collect();
         let second: Vec<u32> = (0..n).map(|_| r.next_u32()).collect();
-        assert_ne!(first, second, "second buffer equals the first: counter did not advance");
+        assert_ne!(first, second, "second buffer equals the first => counter did not advance");
     }
 
     #[test]
@@ -135,4 +168,18 @@ mod tests {
         assert_ne!(r1.next_u32(), r2.next_u32());
     }
 
+    #[test]
+    fn next_fq_is_uniform_over_range() {
+        let mut r = AesPrg::from_parts("uniform", &[b"seed"]);
+        let (mut hi, n) = (0usize, 200_000usize);
+        for _ in 0..n {
+            let v = r.next_fq().0 as u64;
+            assert!(v < crate::field::Q);
+            if v >= crate::field::Q / 2 {
+                hi += 1;
+            }
+        }
+        assert!(hi > n * 48 / 100 && hi < n * 52 / 100, "upper-half ratio {hi}/{n}");
+    }
 }
+
